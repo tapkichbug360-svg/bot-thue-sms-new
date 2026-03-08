@@ -1,7 +1,7 @@
 ﻿{
   "build": {
     "builder": "NIXPACKS",
-    "buildCommand": "rm -f .env && echo \"BOT_TOKEN=\" > .env && echo \"API_KEY=\" >> .env && echo \"BASE_URL=\" >> .env && echo \"DATABASE_URL=\" >> .env && echo \"ADMIN_ID=\" >> .env && echo \"MB_ACCOUNT=\" >> .env && echo \"MB_NAME=\" >> .env && echo \"MB_BIN=\" >> .env && echo \"SEPAY_TOKEN=\" >> .env && cat .env && pip install -r requirements.txt"
+    "buildCommand": "rm -f .env && echo \"BOT_TOKEN=$BOT_TOKEN\" > .env && echo \"API_KEY=$API_KEY\" >> .env && echo \"BASE_URL=$BASE_URL\" >> .env && echo \"DATABASE_URL=$DATABASE_URL\" >> .env && echo \"ADMIN_ID=$ADMIN_ID\" >> .env && echo \"MB_ACCOUNT=$MB_ACCOUNT\" >> .env && echo \"MB_NAME=$MB_NAME\" >> .env && echo \"MB_BIN=$MB_BIN\" >> .env && echo \"SEPAY_TOKEN=$SEPAY_TOKEN\" >> .env && cat .env && pip install -r requirements.txt"
   },
   "deploy": {
     "startCommand": "python bot_railway.py"
