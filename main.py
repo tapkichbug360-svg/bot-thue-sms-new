@@ -743,7 +743,7 @@ logger.info("="*60)
 if __name__ == '__main__':
     import threading
     
-    port = int(os.getenv('PORT', 8080))
+    port = int(os.getenv('PORT', 10000))
     
     flask_thread = threading.Thread(
         target=lambda: app.run(
@@ -767,3 +767,4 @@ if __name__ == '__main__':
             time.sleep(60)
     except KeyboardInterrupt:
         logger.info("👋 Đã dừng Flask server")
+
