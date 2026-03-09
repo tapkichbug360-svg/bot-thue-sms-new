@@ -30,7 +30,7 @@ from handlers.balance import balance_command
 from handlers.deposit import deposit_command, deposit_amount_callback, deposit_check_callback
 from handlers.callback import menu_callback
 
-# ===== 5 CÁCH ĐỌC BIẾN MÔI TRƯỜNG - TĂNG TỐI ĐA KHẢ NĂNG TÌM THẤY TOKEN =====
+# ===== 5 CÁCH ĐỌC BIẾN MÔI TRƯỜNG =====
 print("🔍 ĐANG TÌM KIẾM BIẾN MÔI TRƯỜNG (5 CÁCH)...")
 
 BOT_TOKEN = None
@@ -43,7 +43,7 @@ MB_BIN = None
 SEPAY_TOKEN = None
 RENDER_URL = None
 
-# === CÁCH 1: Load từ dotenv (ưu tiên cao nhất) ===
+# === CÁCH 1: Load từ dotenv ===
 load_dotenv()
 print("✅ Cách 1: Đã load dotenv")
 
@@ -61,7 +61,7 @@ RENDER_URL = os.getenv('RENDER_URL')
 if BOT_TOKEN:
     print("✅ Cách 2: Tìm thấy BOT_TOKEN từ biến môi trường")
 
-# === CÁCH 3: Đọc trực tiếp từ file .env (nếu chưa có) ===
+# === CÁCH 3: Đọc trực tiếp từ file .env ===
 if not BOT_TOKEN and os.path.exists('.env'):
     print("📁 Cách 3: Đọc trực tiếp từ file .env...")
     with open('.env', 'r', encoding='utf-8') as f:
@@ -93,7 +93,7 @@ if not BOT_TOKEN and os.path.exists('.env'):
                 elif key == 'RENDER_URL' and not RENDER_URL:
                     RENDER_URL = value
 
-# === CÁCH 4: Đọc từ file .env với encoding khác (nếu chưa có) ===
+# === CÁCH 4: Đọc với encoding khác ===
 if not BOT_TOKEN and os.path.exists('.env'):
     print("📁 Cách 4: Thử đọc với encoding khác...")
     try:
@@ -108,7 +108,7 @@ if not BOT_TOKEN and os.path.exists('.env'):
     except:
         pass
 
-# === CÁCH 5: Đọc từ biến môi trường của Docker/Render (nếu chưa có) ===
+# === CÁCH 5: Đọc từ secrets ===
 if not BOT_TOKEN:
     try:
         if os.path.exists('/etc/secrets/BOT_TOKEN'):
@@ -144,12 +144,6 @@ VN_TZ = timezone(timedelta(hours=7))
 def get_vn_time():
     """Lấy thời gian Việt Nam hiện tại"""
     return datetime.now(VN_TZ).replace(tzinfo=None)
-
-# Tạo thư mục database
-db_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'database')
-if not os.path.exists(db_dir):
-    os.makedirs(db_dir)
-
 # ===== CẤU HÌNH LOGGING =====
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
@@ -157,28 +151,43 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ===== TẠO THƯ MỤC DATABASE =====
+# Tạo thư mục database nếu chưa tồn tại
+db_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'database')
+os.makedirs(db_dir, exist_ok=True)
+logger.info(f"📁 Thư mục database: {db_dir}")
+
 # ===== KHỞI TẠO FLASK APP =====
 app = Flask(__name__)
 
-db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'database', 'bot.db')
+# Đường dẫn database
+db_path = os.path.join(db_dir, 'bot.db')
 app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{db_path}'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+logger.info(f"🗄️ Database path: {db_path}")
 
+# Khởi tạo database với Flask app
 db.init_app(app)
 
+# ===== TẠO DATABASE =====
 with app.app_context():
     try:
         db.create_all()
-        logger.info("✅ ĐÃ TẠO DATABASE THÀNH CÔNG!")
+        logger.info("✅ Database đã được tạo/sẵn sàng!")
+        
+        # Kiểm tra số lượng bảng
+        from sqlalchemy import inspect
+        inspector = inspect(db.engine)
+        tables = inspector.get_table_names()
+        logger.info(f"📊 Các bảng trong database: {tables}")
+        
     except Exception as e:
-        if "already exists" in str(e):
-            logger.info("ℹ️ Database đã tồn tại")
-        else:
-            logger.error(f"LỖI TẠO DATABASE: {e}")
+        logger.error(f"❌ Lỗi tạo database: {e}")
 
 # ===== THIẾT LẬP WEBHOOK SEPAY =====
 setup_sepay_webhook(app)
 
+# ===== ROUTE TRANG CHỦ =====
 @app.route('/')
 def home():
     return "Bot đang chạy! MBBank: 666666291005 - NGUYEN THE LAM"
