@@ -1,13 +1,19 @@
 ﻿from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from bot import app
 from telegram.ext import CallbackContext as Context
-from database.models import User, Rental, db
+from database.models import User, Rental, BalanceLog, db
 from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import requests
 import os
 import logging
 import time
 import asyncio
+from typing import Dict
+VN_TZ = timezone(timedelta(hours=7))
+def get_vn_time():
+    """Lấy thời gian Việt Nam hiện tại"""
+    return datetime.now(VN_TZ).replace(tzinfo=None)
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +25,9 @@ services_cache = []
 services_cache_time = 0
 networks_cache = []
 networks_cache_time = 0
+
+# Dictionary để lưu trữ các task auto-check OTP
+auto_check_tasks: Dict[int, asyncio.Task] = {}
 
 async def delete_previous_menu(update: Update, context: Context):
     """Xóa menu trước đó để tránh nhiều menu chồng lên nhau"""
@@ -331,7 +340,7 @@ async def rent_network_callback(update: Update, context: Context):
     )
 
 async def rent_confirm_callback(update: Update, context: Context):
-    """Xác nhận thuê số - Gọi API lấy số"""
+    """Xác nhận thuê số - Gọi API lấy số (ĐÃ FIX LỖI CỘNG TRỪ KHI THUÊ LIÊN TỤC)"""
     query = update.callback_query
     await query.answer()
     
@@ -345,15 +354,38 @@ async def rent_confirm_callback(update: Update, context: Context):
         await query.edit_message_text("❌ **LỖI DỮ LIỆU**\n\nVui lòng chọn lại.")
         return
     
+    # ===== KIỂM TRA API KEY =====
+    if not API_KEY or not BASE_URL:
+        await query.edit_message_text("❌ **LỖI CẤU HÌNH**\n\nVui lòng liên hệ admin.")
+        return
+    
     user = update.effective_user
     
     with app.app_context():
-        db_user = User.query.filter_by(user_id=user.id).first()
+        # ===== LẤY USER MỚI NHẤT VỚI KHÓA =====
+        db_user = User.query.filter_by(user_id=user.id).with_for_update().first()
+        
+        logger.info(f"🔍 [BẮT ĐẦU] User {user.id} - Số dư từ DB: {db_user.balance if db_user else 0}đ")
         
         if not db_user:
             await query.edit_message_text("❌ **KHÔNG TÌM THẤY TÀI KHOẢN**\n\nVui lòng gửi /start để đăng ký.")
             return
         
+        # ===== KIỂM TRA GIAO DỊCH GẦN ĐÂY (CHỐNG SPAM) =====
+        recent_transactions = Rental.query.filter(
+            Rental.user_id == user.id,
+            Rental.created_at > datetime.now() - timedelta(seconds=10)
+        ).count()
+        
+        if recent_transactions > 3:
+            logger.warning(f"⚠️ User {user.id} đang thuê quá nhanh: {recent_transactions} lần/10s")
+            await query.edit_message_text(
+                "⚠️ **BẠN ĐANG THUÊ QUÁ NHANH**\n\nVui lòng chờ 10 giây giữa các lần thuê.",
+                parse_mode='Markdown'
+            )
+            return
+        
+        # ===== LỚP BẢO VỆ 1: KIỂM TRA SỐ DƯ LẦN 1 =====
         if db_user.balance < final_price:
             shortage = final_price - db_user.balance
             keyboard = [
@@ -372,8 +404,11 @@ async def rent_confirm_callback(update: Update, context: Context):
             )
             return
         
-        # Xóa menu hiện tại
-        await query.message.delete()
+        # Xóa menu hiện tại (có bắt lỗi)
+        try:
+            await query.message.delete()
+        except Exception as e:
+            logger.warning(f"Không thể xóa message: {e}")
         
         loading_msg = await context.bot.send_message(
             chat_id=update.effective_chat.id,
@@ -382,24 +417,28 @@ async def rent_confirm_callback(update: Update, context: Context):
         )
         
         try:
+            # ===== GỌI API LẤY SỐ (TRƯỚC KHI TRỪ TIỀN) =====
             url = f"{BASE_URL}/sim/get_sim"
-            
-            # Tạo params
             params = {
                 'api_key': API_KEY,
                 'service_id': service_id
             }
-            
-            # Thêm network_id nếu có
             if network_id and network_id != 'None':
                 params['network_id'] = network_id
             
             logger.info(f"📞 Gọi API lấy số: service_id={service_id}, network_id={network_id}")
             response = requests.get(url, params=params, timeout=15)
-            response_data = response.json()
             
+            # ===== KIỂM TRA HTTP STATUS =====
+            if response.status_code == 401:
+                logger.error("🔴 API_KEY hết hạn")
+                await loading_msg.edit_text("❌ **LỖI XÁC THỰC API**\n\nVui lòng liên hệ admin.")
+                return
+            
+            response_data = response.json()
             logger.info(f"API response: {response_data}")
             
+            # ===== XỬ LÝ KHI API THÀNH CÔNG =====
             if response_data.get('status') == 200:
                 sim_data = response_data.get('data', {})
                 phone = sim_data.get('phone')
@@ -407,83 +446,210 @@ async def rent_confirm_callback(update: Update, context: Context):
                 sim_id = sim_data.get('simId')
                 actual_price = sim_data.get('payment', final_price - 1000)
                 
-                old_balance = db_user.balance
-                db_user.balance -= final_price
-                db_user.total_spent += final_price
-                db_user.total_rentals += 1
+                # ===== KIỂM TRA SỐ TRÙNG =====
+                existing_rental = Rental.query.filter_by(
+                    phone_number=phone, 
+                    status='waiting'
+                ).first()
                 
-                rent_info = context.user_data.get('rent', {})
-                
-                rental = Rental(
-                    user_id=user.id,
-                    service_id=int(service_id),
-                    service_name=rent_info['service_name'],
-                    phone_number=phone,
-                    otp_id=otp_id,
-                    sim_id=sim_id,
-                    cost=actual_price,
-                    price_charged=final_price,
-                    status='waiting',
-                    created_at=datetime.now(),
-                    expires_at=datetime.now() + timedelta(minutes=5)
-                )
-                db.session.add(rental)
-                db.session.commit()
-                
-                logger.info(f"✅ User {user.id} thuê số {phone} thành công")
-                logger.info(f"💰 Đã trừ {final_price}đ (từ {old_balance}đ còn {db_user.balance}đ)")
-                
-                # Lưu rental vào context
-                if 'active_rentals' not in context.user_data:
-                    context.user_data['active_rentals'] = []
-                context.user_data['active_rentals'].append({
-                    'id': rental.id,
-                    'phone': phone,
-                    'service': rent_info['service_name'],
-                    'expires_at': rental.expires_at.isoformat()
-                })
-                
-                keyboard = [
-                    [InlineKeyboardButton(f"📞 {phone} - {rent_info['service_name']}", callback_data=f"rent_view_{rental.id}")],
-                    [InlineKeyboardButton("📋 DANH SÁCH SỐ", callback_data="menu_rent_list")],
-                    [InlineKeyboardButton("🆕 THUÊ SỐ KHÁC", callback_data="menu_rent")],
-                    [InlineKeyboardButton("🔙 MENU CHÍNH", callback_data="menu_main")]
-                ]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                text = (
-                    f"✅ **THUÊ SỐ THÀNH CÔNG!**\n\n"
-                    f"📞 **Số:** `{phone}`\n"
-                    f"📱 **Dịch vụ:** {rent_info['service_name']}\n"
-                    f"💰 **Đã thanh toán:** {final_price:,}đ\n"
-                    f"💵 **Số dư còn lại:** {db_user.balance:,}đ\n"
-                    f"⏰ **Hết hạn lúc:** {rental.expires_at.strftime('%H:%M:%S')}\n\n"
-                    f"🤖 **TỰ ĐỘNG KIỂM TRA OTP**\n"
-                    f"• Bot sẽ tự động kiểm tra và báo khi có OTP\n"
-                    f"• Bạn có thể theo dõi số qua menu trên"
-                )
-                
-                await loading_msg.edit_text(text, reply_markup=reply_markup, parse_mode='Markdown')
-                
-                # Bắt đầu tự động kiểm tra OTP
-                asyncio.create_task(
-                    auto_check_otp_task(
-                        context.bot,
-                        chat_id=update.effective_chat.id,
-                        otp_id=otp_id,
-                        rental_id=rental.id,
-                        user_id=user.id,
-                        service_name=rent_info['service_name'],
-                        phone=phone
+                if existing_rental:
+                    logger.error(f"⚠️ Số {phone} đã được thuê bởi user {existing_rental.user_id}")
+                    await loading_msg.edit_text(
+                        "❌ **LỖI HỆ THỐNG**\n\nSố này đã được cấp cho người khác.\nVui lòng thử lại sau.",
+                        parse_mode='Markdown'
                     )
-                )
+                    return
                 
+                # ===== BẮT ĐẦU TRANSACTION =====
+                try:
+                    # Refresh user để lấy số dư mới nhất
+                    db.session.refresh(db_user)
+                    
+                    # ===== XÓA CACHE VÀ KIỂM TRA LẠI SỐ DƯ =====
+                    db.session.expire_all()
+                    db.session.refresh(db_user)
+                    logger.info(f"💰 SỐ DƯ THỰC TẾ SAU KHI REFRESH: {db_user.balance}đ")
+                    
+                    # ===== LỚP BẢO VỆ 2: KIỂM TRA LẠI SỐ DƯ SAU REFRESH =====
+                    if db_user.balance < final_price:
+                        logger.error(f"❌ Phát hiện bất thường: Số dư {db_user.balance}đ không đủ sau refresh")
+                        await loading_msg.edit_text(
+                            "❌ **LỖI HỆ THỐNG**\n\nSố dư không đủ, vui lòng thử lại.",
+                            parse_mode='Markdown'
+                        )
+                        return
+                    
+                    old_balance = db_user.balance
+                    logger.info(f"💰 [TRƯỚC KHI TRỪ] Số dư: {old_balance}đ (đã kiểm tra lần cuối)")
+                    
+                    # Lấy thông tin dịch vụ
+                    rent_info = context.user_data.get('rent', {})
+                    if not rent_info:
+                        logger.error("❌ user_data mất")
+                        await loading_msg.edit_text(
+                            "❌ **LỖI SESSION**\n\nVui lòng chọn lại từ đầu.",
+                            reply_markup=InlineKeyboardMarkup([[
+                                InlineKeyboardButton("📱 CHỌN LẠI", callback_data="menu_rent")
+                            ]])
+                        )
+                        return
+                    
+                    # Tạo rental object
+                    rental = Rental(
+                        user_id=user.id,
+                        service_id=int(service_id),
+                        service_name=rent_info['service_name'],
+                        phone_number=phone,
+                        otp_id=otp_id,
+                        sim_id=sim_id,
+                        cost=actual_price,
+                        price_charged=final_price,
+                        status='waiting',
+                        created_at=datetime.now(),
+                        expires_at=datetime.now() + timedelta(minutes=5)
+                    )
+                    db.session.add(rental)
+                    
+                    # ===== TRỪ TIỀN =====
+                    db_user.balance -= final_price
+                    db_user.total_spent += final_price
+                    db_user.total_rentals += 1
+                    db_user.updated_at = datetime.now()
+                    
+                    # ===== LỚP BẢO VỆ 3: DELAY NHỎ GIỮA CÁC TRANSACTION =====
+                    await asyncio.sleep(0.3)
+                    
+                    # ===== COMMIT MỘT LẦN DUY NHẤT =====
+                    db.session.commit()
+                    
+                    # ===== KIỂM TRA SAU COMMIT =====
+                    db.session.refresh(db_user)
+                    logger.info(f"✅ User {user.id} thuê số {phone} thành công")
+                    logger.info(f"💰 Đã trừ {final_price}đ (từ {old_balance}đ còn {db_user.balance}đ)")
+                    logger.info(f"🔍 [SAU COMMIT] User {user.id} - Số dư: {db_user.balance}đ")
+                    
+                    # ===== KIỂM TRA SỐ DƯ KỲ VỌNG =====
+                    expected_balance = old_balance - final_price
+                    if db_user.balance != expected_balance:
+                        logger.error(f"❌ LỖI NGHIÊM TRỌNG: Số dư không khớp! expected={expected_balance}, actual={db_user.balance}")
+                    
+                    # Xóa dữ liệu tạm
+                    if 'rent' in context.user_data:
+                        del context.user_data['rent']
+                    
+                    # Lưu rental vào context
+                    if 'active_rentals' not in context.user_data:
+                        context.user_data['active_rentals'] = []
+                    context.user_data['active_rentals'].append({
+                        'id': rental.id,
+                        'phone': phone,
+                        'service': rent_info['service_name'],
+                        'expires_at': rental.expires_at.isoformat()
+                    })
+                    
+                    # Tạo keyboard
+                    keyboard = [
+                        [InlineKeyboardButton(f"📞 {phone} - {rent_info['service_name']}", callback_data=f"rent_view_{rental.id}")],
+                        [InlineKeyboardButton("📋 DANH SÁCH SỐ", callback_data="menu_rent_list")],
+                        [InlineKeyboardButton("🆕 THUÊ SỐ KHÁC", callback_data="menu_rent")],
+                        [InlineKeyboardButton("🔙 MENU CHÍNH", callback_data="menu_main")]
+                    ]
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    
+                    text = (
+                        f"✅ **THUÊ SỐ THÀNH CÔNG!**\n\n"
+                        f"📞 **Số:** `{phone}`\n"
+                        f"📱 **Dịch vụ:** {rent_info['service_name']}\n"
+                        f"💰 **Đã thanh toán:** {final_price:,}đ\n"
+                        f"💵 **Số dư còn lại:** {db_user.balance:,}đ\n"
+                        f"⏰ **Hết hạn lúc:** {rental.expires_at.strftime('%H:%M:%S')}\n\n"
+                        f"🤖 **TỰ ĐỘNG KIỂM TRA OTP**\n"
+                        f"• Bot sẽ tự động kiểm tra và báo khi có OTP\n"
+                        f"• Bạn có thể theo dõi số qua menu trên"
+                    )
+                    
+                    await loading_msg.edit_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+                    
+                    # Tạo task auto-check
+                    task = asyncio.create_task(
+                        auto_check_otp_task(
+                            context.bot,
+                            chat_id=update.effective_chat.id,
+                            otp_id=otp_id,
+                            rental_id=rental.id,
+                            user_id=user.id,
+                            service_name=rent_info['service_name'],
+                            phone=phone
+                        )
+                    )
+                    auto_check_tasks[rental.id] = task
+                    
+                except Exception as e:
+                    db.session.rollback()
+                    logger.error(f"❌ Lỗi database: {e}")
+                    await loading_msg.edit_text(
+                        "❌ **LỖI HỆ THỐNG**\n\nKhông thể lưu giao dịch.\nVui lòng thử lại sau.",
+                        parse_mode='Markdown'
+                    )
+            
+            # ===== XỬ LÝ KHI API LỖI =====
             else:
                 error_msg = response_data.get('message', 'Không rõ lỗi')
+                logger.info(f"🔍 API lỗi: {error_msg}")
+                
+                # Kiểm tra lỗi hết số
+                if any(word in error_msg.lower() for word in ['hết số', 'no sim', 'out of stock', 'hết sim']):
+                    display_msg = "⚠️ **DỊCH VỤ ĐANG TẠM HẾT SỐ**\n\n" \
+                                f"📢 {error_msg}\n\n" \
+                                "💡 **Gợi ý:**\n" \
+                                "• Chọn nhà mạng khác\n" \
+                                "• Thử lại sau 5-10 phút\n" \
+                                "• Chọn dịch vụ khác"
+                    
+                    # Lấy thông tin dịch vụ hiện tại
+                    rent_info = context.user_data.get('rent', {})
+                    current_service_id = rent_info.get('service_id')
+                    
+                    # Tạo menu dịch vụ khác
+                    keyboard = []
+                    services = await get_services()
+                    
+                    if services:
+                        other_services = [sv for sv in services if str(sv['id']) != current_service_id][:6]
+                        
+                        row = []
+                        for sv in other_services:
+                            try:
+                                original_price = int(float(sv['price']))
+                            except:
+                                original_price = 1200
+                            
+                            button = InlineKeyboardButton(
+                                f"📱 {sv['name']}",
+                                callback_data=f"rent_service_{sv['id']}_{sv['name']}_{original_price}"
+                            )
+                            row.append(button)
+                            
+                            if len(row) == 2:
+                                keyboard.append(row)
+                                row = []
+                        
+                        if row:
+                            keyboard.append(row)
+                    
+                    keyboard.append([InlineKeyboardButton("🔄 THỬ LẠI", callback_data="menu_rent")])
+                    keyboard.append([InlineKeyboardButton("🔙 MENU CHÍNH", callback_data="menu_main")])
+                    
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    
+                else:
+                    display_msg = f"❌ **LỖI TỪ MÁY CHỦ**\n\n📢 {error_msg}"
+                    keyboard = [[InlineKeyboardButton("🔙 QUAY LẠI", callback_data="menu_rent")]]
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                
                 await loading_msg.edit_text(
-                    f"❌ **LỖI TỪ MÁY CHỦ**\n\n"
-                    f"📢 Thông báo: {error_msg}\n\n"
-                    f"Vui lòng thử lại sau hoặc chọn dịch vụ khác.",
+                    display_msg,
+                    reply_markup=reply_markup,
                     parse_mode='Markdown'
                 )
                 
@@ -494,7 +660,7 @@ async def rent_confirm_callback(update: Update, context: Context):
                 parse_mode='Markdown'
             )
         except Exception as e:
-            logger.error(f"Lỗi thuê số: {e}")
+            logger.error(f"❌ Lỗi thuê số: {e}")
             import traceback
             traceback.print_exc()
             await loading_msg.edit_text(
@@ -504,7 +670,7 @@ async def rent_confirm_callback(update: Update, context: Context):
             )
 
 async def rent_check_callback(update: Update, context: Context):
-    """Kiểm tra OTP thủ công - GỬI FILE AUDIO NẾU CÓ"""
+    """Kiểm tra OTP thủ công - GỬI CẢ TEXT VÀ AUDIO"""
     query = update.callback_query
     await query.answer()
     
@@ -555,319 +721,371 @@ async def rent_check_callback(update: Update, context: Context):
                 otp_code = otp_data.get('code')
                 content = otp_data.get('content', '')
                 sender = otp_data.get('senderName', '')
-                audio_url = otp_data.get('audio')  # URL file audio cuộc gọi
+                audio_url = otp_data.get('audio')
                 
-                # Cập nhật trạng thái rental
                 rental.status = 'success'
                 rental.otp_code = otp_code or "Audio OTP"
                 rental.content = content
                 rental.updated_at = datetime.now()
                 db.session.commit()
                 
-                # === XỬ LÝ AUDIO ===
+                # ==== GỬI OTP DẠNG SỐ (NẾU CÓ) ====
+                if otp_code:
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text=f"✅ **MÃ OTP:** `{otp_code}`\n📝 {content}",
+                        parse_mode='Markdown'
+                    )
+                    logger.info(f"✅ Đã gửi OTP text cho rental {rental_id}")
+                
+                # ==== GỬI FILE AUDIO (NẾU CÓ) ====
                 if audio_url:
                     try:
-                        logger.info(f"🎵 Đang tải audio từ: {audio_url}")
+                        # Thông báo đang tải audio
+                        await context.bot.send_message(
+                            chat_id=update.effective_chat.id,
+                            text="⏳ **ĐANG TẢI FILE AUDIO OTP...**",
+                            parse_mode='Markdown'
+                        )
                         
                         # Tải file audio
-                        audio_response = requests.get(audio_url, timeout=15)
+                        headers = {'User-Agent': 'Mozilla/5.0'}
+                        audio_response = requests.get(audio_url, headers=headers, timeout=30)
                         
                         if audio_response.status_code == 200:
-                            # Xác định định dạng file
-                            content_type = audio_response.headers.get('content-type', 'audio/mpeg')
-                            file_ext = 'mp3'
-                            if 'wav' in content_type:
-                                file_ext = 'wav'
-                            elif 'ogg' in content_type:
-                                file_ext = 'ogg'
-                            
-                            # Gửi file audio trực tiếp
+                            # Gửi file audio
                             await context.bot.send_audio(
                                 chat_id=update.effective_chat.id,
                                 audio=audio_response.content,
-                                filename=f"otp_call_{rental_id}.{file_ext}",
-                                title=f"📞 Cuộc gọi OTP từ {rental.service_name}",
-                                caption=(
-                                    f"📞 **CUỘC GỌI OTP**\n\n"
-                                    f"• **Dịch vụ:** {rental.service_name}\n"
-                                    f"• **Số điện thoại:** `{rental.phone_number}`\n"
-                                    f"• **Thời gian:** {datetime.now().strftime('%H:%M:%S %d/%m/%Y')}\n\n"
-                                    f"▶️ **Bấm play để nghe lại cuộc gọi**"
-                                ),
+                                filename=f"otp_audio_{rental_id}.mp3",
+                                title=f"OTP Audio - {rental.service_name}",
+                                caption=f"📱 **{rental.service_name}**\n📞 `{rental.phone_number}`",
                                 parse_mode='Markdown'
                             )
-                            logger.info(f"✅ Đã gửi file audio cuộc gọi cho rental {rental_id}")
-                            
+                            logger.info(f"✅ Đã gửi audio OTP cho rental {rental_id}")
                         else:
-                            logger.error(f"❌ Không thể tải audio, status code: {audio_response.status_code}")
-                            # Gửi link nếu không tải được
-                            keyboard = [[InlineKeyboardButton("🎵 NGHE OTP TRÊN WEB", url=audio_url)]]
-                            reply_markup = InlineKeyboardMarkup(keyboard)
+                            # Nếu lỗi, gửi link
                             await context.bot.send_message(
                                 chat_id=update.effective_chat.id,
-                                text=(
-                                    f"📞 **CÓ OTP DẠNG CUỘC GỌI**\n\n"
-                                    f"• **Dịch vụ:** {rental.service_name}\n"
-                                    f"• **Số:** `{rental.phone_number}`\n\n"
-                                    f"❌ Không thể tải file audio tự động.\n"
-                                    f"👇 Bấm nút bên dưới để nghe trên web:"
-                                ),
-                                reply_markup=reply_markup,
+                                text=f"🔊 **LINK AUDIO OTP**\n\n"
+                                    f"📱 **{rental.service_name}**\n"
+                                    f"📞 `{rental.phone_number}`\n\n"
+                                    f"[Nhấn vào đây để nghe]({audio_url})",
                                 parse_mode='Markdown'
                             )
-                            
                     except Exception as e:
-                        logger.error(f"❌ Lỗi xử lý audio: {e}")
+                        logger.error(f"Lỗi tải audio: {e}")
                         # Gửi link dự phòng
-                        keyboard = [[InlineKeyboardButton("🎵 NGHE OTP", url=audio_url)]]
-                        reply_markup = InlineKeyboardMarkup(keyboard)
                         await context.bot.send_message(
                             chat_id=update.effective_chat.id,
-                            text=(
-                                f"📞 **CÓ OTP DẠNG CUỘC GỌI**\n\n"
-                                f"• **Dịch vụ:** {rental.service_name}\n"
-                                f"• **Số:** `{rental.phone_number}`\n\n"
-                                f"👇 Bấm nút để nghe trên web:"
-                            ),
-                            reply_markup=reply_markup,
+                            text=f"🔊 **LINK AUDIO OTP**\n\n"
+                                f"📱 **{rental.service_name}**\n"
+                                f"📞 `{rental.phone_number}`\n\n"
+                                f"[Nhấn vào đây để nghe]({audio_url})",
                             parse_mode='Markdown'
                         )
                 
-                # === GỬI OTP DẠNG TEXT NẾU CÓ ===
-                if otp_code:
-                    text_message = (
-                        f"✅ **NHẬN OTP THÀNH CÔNG!**\n\n"
-                        f"🔑 **Mã OTP:** `{otp_code}`\n"
-                        f"📝 **Nội dung:** {content}\n"
-                        f"👤 **Người gửi:** {sender}\n"
-                        f"📱 **Dịch vụ:** {rental.service_name}\n"
-                        f"📞 **Số:** `{rental.phone_number}`"
-                    )
-                    await context.bot.send_message(
-                        chat_id=update.effective_chat.id,
-                        text=text_message,
-                        parse_mode='Markdown'
-                    )
-                elif not audio_url:
-                    # Không có cả audio và text
+                # Nếu không có cả OTP và audio
+                elif not otp_code and not audio_url:
                     await context.bot.send_message(
                         chat_id=update.effective_chat.id,
                         text=f"✅ **ĐÃ NHẬN OTP**\n\n📱 **Dịch vụ:** {rental.service_name}\n📞 **Số:** `{rental.phone_number}`",
                         parse_mode='Markdown'
                     )
                 
-                # Xóa menu cũ
                 await query.delete_message()
                 
             elif status == 202:
-                # Chưa có OTP
                 expires_in = int((rental.expires_at - datetime.now()).total_seconds() / 60)
                 await query.edit_message_text(
-                    f"⏳ **CHƯA CÓ OTP**\n\n"
-                    f"• **Số:** `{rental.phone_number}`\n"
-                    f"• **Dịch vụ:** {rental.service_name}\n"
-                    f"• **Còn:** {expires_in} phút\n\n"
-                    f"Vui lòng thử lại sau vài giây.",
+                    f"⏳ **CHƯA CÓ OTP**\n\n• Còn {expires_in} phút",
                     parse_mode='Markdown'
                 )
-                
-            elif status == 312:
-                await query.edit_message_text(
-                    f"⏳ **ĐANG CHỜ OTP**\n\n"
-                    f"• **Số:** `{rental.phone_number}`\n"
-                    f"• **Dịch vụ:** {rental.service_name}",
-                    parse_mode='Markdown'
-                )
-                
-            elif status == 400:
-                rental.status = 'expired'
-                rental.updated_at = datetime.now()
-                db.session.commit()
-                
-                await query.edit_message_text(
-                    f"⏰ **OTP ĐÃ HẾT HẠN**\n\n"
-                    f"Số `{rental.phone_number}` đã hết hạn.\n"
-                    f"Vui lòng thuê số mới.",
-                    parse_mode='Markdown'
-                )
-                
             else:
-                error_msg = response_data.get('message', 'Không xác định')
-                await query.edit_message_text(
-                    f"❌ **LỖI KIỂM TRA OTP**\n\n"
-                    f"Lỗi: {error_msg}\n\n"
-                    f"Vui lòng thử lại sau.",
-                    parse_mode='Markdown'
-                )
+                await query.edit_message_text("⏳ **ĐANG CHỜ OTP...**")
                 
-    except requests.exceptions.Timeout:
-        await query.edit_message_text(
-            "⏰ **TIMEOUT - MÁY CHỦ KHÔNG PHẢN HỒI**\n\n"
-            "Vui lòng thử lại sau.",
-            parse_mode='Markdown'
-        )
     except Exception as e:
         logger.error(f"Lỗi kiểm tra OTP: {e}")
-        import traceback
-        traceback.print_exc()
-        await query.edit_message_text(
-            "❌ **LỖI KẾT NỐI**\n\n"
-            "Vui lòng thử lại sau.",
-            parse_mode='Markdown'
-        )
+        await query.edit_message_text("❌ **LỖI KẾT NỐI**")
 
 async def auto_check_otp_task(bot, chat_id: int, otp_id: str, rental_id: int, user_id: int, service_name: str, phone: str):
-    """Tự động kiểm tra OTP - GỬI FILE AUDIO KHI CÓ CUỘC GỌI"""
+    """Tự động kiểm tra OTP - SIÊU BẢO VỆ + GỬI CẢ TEXT VÀ AUDIO + CHỐNG CỘNG TRỪ SAI"""
     logger.info(f"🤖 Bắt đầu auto-check OTP cho rental {rental_id}")
     
-    max_checks = 60
+    max_checks = 120
     check_count = 0
     
-    while check_count < max_checks:
-        check_count += 1
-        logger.info(f"🔄 Auto-check OTP lần {check_count}/{max_checks} cho rental {rental_id}")
-        
-        try:
-            url = f"{BASE_URL}/otp/get_otp_by_phone_api_key"
-            params = {'api_key': API_KEY, 'otp_id': otp_id}
-            response = requests.get(url, params=params, timeout=5)
-            response_data = response.json()
-            
-            status = response_data.get('status')
-            
-            if status == 200:
-                otp_data = response_data.get('data', {})
-                otp_code = otp_data.get('code')
-                content = otp_data.get('content', '')
-                sender = otp_data.get('senderName', '')
-                audio_url = otp_data.get('audio')  # URL file audio cuộc gọi
+    # Cache để tránh xử lý trùng
+    processed = False
+    
+    try:
+        while check_count < max_checks and not processed:
+            if asyncio.current_task().cancelled():
+                logger.info(f"🛑 Task {rental_id} bị hủy")
+                return
                 
+            check_count += 1
+            logger.info(f"🔄 Auto-check OTP lần {check_count}/{max_checks} cho rental {rental_id}")
+            
+            try:
                 with app.app_context():
-                    rental = Rental.query.get(rental_id)
-                    if rental and rental.status == 'waiting':
-                        rental.status = 'success'
-                        rental.otp_code = otp_code or "Gọi điện"
-                        rental.content = content
-                        rental.updated_at = datetime.now()
-                        db.session.commit()
+                    # ===== LỚP BẢO VỆ 1: KIỂM TRA RENTAL VỚI KHÓA =====
+                    rental = Rental.query.filter_by(id=rental_id).with_for_update().first()
+                    
+                    if not rental:
+                        logger.info(f"❌ Rental {rental_id} không tồn tại")
+                        return
+                    
+                    # ===== LỚP BẢO VỆ 2: NẾU ĐÃ HOÀN THÌ DỪNG =====
+                    if rental.refunded:
+                        logger.info(f"✅ Rental {rental_id} đã hoàn {rental.refund_amount}đ, dừng auto-check")
+                        return
+                    
+                    # ===== LỚP BẢO VỆ 3: NẾU ĐÃ XỬ LÝ XONG THÌ DỪNG =====
+                    if rental.status in ['cancelled', 'expired', 'success']:
+                        logger.info(f"✅ Rental {rental_id} đã {rental.status}, dừng auto-check")
+                        return
+                
+                # Gọi API kiểm tra OTP
+                url = f"{BASE_URL}/otp/get_otp_by_phone_api_key"
+                params = {'api_key': API_KEY, 'otp_id': otp_id}
+                response = requests.get(url, params=params, timeout=5)
+                response_data = response.json()
+                
+                status = response_data.get('status')
+                
+                # ===== XỬ LÝ KHI CÓ OTP =====
+                if status == 200:
+                    otp_data = response_data.get('data', {})
+                    otp_code = otp_data.get('code')
+                    content = otp_data.get('content', '')
+                    audio_url = otp_data.get('audio')
+                    
+                    with app.app_context():
+                        # ===== LỚP BẢO VỆ 4: KIỂM TRA LẠI TRƯỚC KHI CẬP NHẬT =====
+                        rental = Rental.query.filter_by(id=rental_id).with_for_update().first()
                         
-                        logger.info(f"✅ Auto-check: Nhận OTP cho rental {rental_id}")
-                        
-                        # === GỬI FILE AUDIO CUỘC GỌI ===
-                        if audio_url:
-                            try:
-                                logger.info(f"🎵 Đang tải audio cuộc gọi từ: {audio_url}")
-                                
-                                # Tải file audio
-                                audio_response = requests.get(audio_url, timeout=15)
-                                
-                                if audio_response.status_code == 200:
-                                    # Xác định định dạng file
-                                    content_type = audio_response.headers.get('content-type', 'audio/mpeg')
-                                    file_ext = 'mp3'  # Mặc định
-                                    if 'wav' in content_type:
-                                        file_ext = 'wav'
-                                    elif 'ogg' in content_type:
-                                        file_ext = 'ogg'
-                                    
-                                    # Gửi file audio lên Telegram
-                                    await bot.send_audio(
-                                        chat_id=chat_id,
-                                        audio=audio_response.content,
-                                        filename=f"otp_call_{rental_id}.{file_ext}",
-                                        title=f"📞 Cuộc gọi OTP từ {service_name}",
-                                        caption=(
-                                            f"📞 **CUỘC GỌI OTP**\n\n"
-                                            f"• **Dịch vụ:** {service_name}\n"
-                                            f"• **Số điện thoại:** `{phone}`\n"
-                                            f"• **Thời gian:** {datetime.now().strftime('%H:%M:%S %d/%m/%Y')}\n\n"
-                                            f"▶️ **Bấm play để nghe lại cuộc gọi**"
-                                        ),
-                                        parse_mode='Markdown'
-                                    )
-                                    logger.info(f"✅ Đã gửi file audio cuộc gọi cho rental {rental_id}")
-                                    
-                                    # Gửi thêm OTP text nếu có
-                                    if otp_code:
-                                        await bot.send_message(
-                                            chat_id=chat_id,
-                                            text=f"🔑 **MÃ OTP:** `{otp_code}`\n📝 {content}",
-                                            parse_mode='Markdown'
-                                        )
-                                        
-                                else:
-                                    logger.error(f"❌ Không thể tải audio, status code: {audio_response.status_code}")
-                                    # Fallback: gửi link nếu không tải được
-                                    keyboard = [[InlineKeyboardButton("🎵 NGHE OTP TRÊN WEB", url=audio_url)]]
-                                    reply_markup = InlineKeyboardMarkup(keyboard)
-                                    await bot.send_message(
-                                        chat_id=chat_id,
-                                        text=(
-                                            f"📞 **CÓ OTP DẠNG CUỘC GỌI**\n\n"
-                                            f"• **Dịch vụ:** {service_name}\n"
-                                            f"• **Số:** `{phone}`\n\n"
-                                            f"❌ Không thể tải file audio tự động.\n"
-                                            f"👇 Bấm nút bên dưới để nghe trên web:"
-                                        ),
-                                        reply_markup=reply_markup,
-                                        parse_mode='Markdown'
-                                    )
-                                    
-                            except Exception as e:
-                                logger.error(f"❌ Lỗi xử lý audio: {e}")
-                                # Fallback
-                                keyboard = [[InlineKeyboardButton("🎵 NGHE OTP", url=audio_url)]]
-                                reply_markup = InlineKeyboardMarkup(keyboard)
+                        if rental and rental.status == 'waiting' and not rental.refunded:
+                            rental.status = 'success'
+                            rental.otp_code = otp_code or "Audio OTP"
+                            rental.content = content
+                            rental.updated_at = datetime.now()
+                            db.session.commit()
+                            processed = True
+                            
+                            # ==== GỬI MÃ OTP DẠNG SỐ (NẾU CÓ) ====
+                            if otp_code:
                                 await bot.send_message(
                                     chat_id=chat_id,
-                                    text=f"📞 **CÓ OTP DẠNG CUỘC GỌI**\n\n👇 Bấm nút để nghe:",
-                                    reply_markup=reply_markup,
+                                    text=f"🔑 **MÃ OTP:** `{otp_code}`\n📝 {content}\n📱 **Dịch vụ:** {service_name}\n📞 **Số:** `{phone}`",
                                     parse_mode='Markdown'
                                 )
+                                logger.info(f"✅ Đã gửi OTP text cho rental {rental_id}")
+                            
+                            # ==== GỬI FILE AUDIO (NẾU CÓ) ====
+                            if audio_url:
+                                try:
+                                    # Thông báo đang tải audio
+                                    await bot.send_message(
+                                        chat_id=chat_id,
+                                        text="⏳ **ĐANG TẢI FILE AUDIO OTP...**",
+                                        parse_mode='Markdown'
+                                    )
+                                    
+                                    # Tải file audio
+                                    headers = {'User-Agent': 'Mozilla/5.0'}
+                                    audio_response = requests.get(audio_url, headers=headers, timeout=30)
+                                    
+                                    if audio_response.status_code == 200:
+                                        # Gửi file audio
+                                        await bot.send_audio(
+                                            chat_id=chat_id,
+                                            audio=audio_response.content,
+                                            filename=f"otp_audio_{rental_id}.mp3",
+                                            title=f"OTP Audio - {service_name}",
+                                            caption=f"📱 **{service_name}**\n📞 `{phone}`",
+                                            parse_mode='Markdown'
+                                        )
+                                        logger.info(f"✅ Đã gửi audio OTP cho rental {rental_id}")
+                                    else:
+                                        # Nếu lỗi, gửi link
+                                        await bot.send_message(
+                                            chat_id=chat_id,
+                                            text=f"🔊 **LINK AUDIO OTP**\n\n"
+                                                f"📱 **{service_name}**\n"
+                                                f"📞 `{phone}`\n\n"
+                                                f"[Nhấn vào đây để nghe]({audio_url})",
+                                            parse_mode='Markdown'
+                                        )
+                                except Exception as e:
+                                    logger.error(f"Lỗi tải audio: {e}")
+                                    # Gửi link dự phòng
+                                    await bot.send_message(
+                                        chat_id=chat_id,
+                                        text=f"🔊 **LINK AUDIO OTP**\n\n"
+                                            f"📱 **{service_name}**\n"
+                                            f"📞 `{phone}`\n\n"
+                                            f"[Nhấn vào đây để nghe]({audio_url})",
+                                        parse_mode='Markdown'
+                                    )
+                            
+                            # Nếu không có cả OTP và audio
+                            elif not otp_code and not audio_url:
+                                await bot.send_message(
+                                    chat_id=chat_id,
+                                    text=f"✅ **ĐÃ NHẬN OTP**\n\n📱 **Dịch vụ:** {service_name}\n📞 **Số:** `{phone}`",
+                                    parse_mode='Markdown'
+                                )
+                            
+                            # Xóa task khỏi dictionary
+                            if rental_id in auto_check_tasks:
+                                del auto_check_tasks[rental_id]
+                            return
+                
+                # ===== XỬ LÝ KHI CHƯA CÓ OTP =====
+                elif status in [202, 312]:
+                    # Chưa có OTP, tiếp tục chờ
+                    pass
+                
+                # ===== XỬ LÝ KHI HẾT HẠN (AUTO HOÀN TIỀN) =====
+                elif status == 400:
+                    with app.app_context():
+                        # ===== LỚP BẢO VỆ 5: KIỂM TRA KỸ TRƯỚC KHI AUTO-HOÀN =====
+                        rental = Rental.query.filter_by(id=rental_id).with_for_update().first()
                         
-                        # Nếu không có audio, chỉ gửi text
-                        elif otp_code:
+                        if not rental:
+                            logger.info(f"❌ Rental {rental_id} không tồn tại")
+                            return
+                        
+                        if rental.status != 'waiting':
+                            logger.info(f"✅ Rental {rental_id} không còn ở trạng thái waiting, bỏ qua")
+                            return
+                        
+                        if rental.refunded:
+                            logger.info(f"✅ Rental {rental_id} đã được hoàn {rental.refund_amount}đ, bỏ qua")
+                            return
+                        
+                        # ===== QUAN TRỌNG: CHỈ HOÀN ĐÚNG price_charged =====
+                        refund = rental.price_charged  # DÒNG NÀY QUYẾT ĐỊNH - KHÔNG DÙNG cost
+                        
+                        logger.info(f"💰 AUTO-HOÀN: rental {rental_id}")
+                        logger.info(f"   price_charged: {rental.price_charged}đ")
+                        logger.info(f"   cost: {rental.cost}đ")
+                        logger.info(f"   Số tiền sẽ hoàn: {refund}đ")
+                        
+                        # ===== KIỂM TRA XEM CÓ HOÀN GẦN ĐÂY KHÔNG =====
+                        recent_refund = Rental.query.filter(
+                            Rental.user_id == rental.user_id,
+                            Rental.refunded == True,
+                            Rental.refunded_at > datetime.now() - timedelta(seconds=10)
+                        ).first()
+                        
+                        if recent_refund:
+                            logger.warning(f"⚠️ Phát hiện hoàn tiền gần đây (cách {datetime.now() - recent_refund.refunded_at}), bỏ qua auto-hoàn")
+                            if rental_id in auto_check_tasks:
+                                del auto_check_tasks[rental_id]
+                            return
+                        
+                        # ===== LẤY USER VỚI KHÓA =====
+                        user = User.query.filter_by(user_id=rental.user_id).with_for_update().first()
+                        
+                        if not user:
+                            logger.error(f"❌ Không tìm thấy user {rental.user_id}")
                             await bot.send_message(
                                 chat_id=chat_id,
-                                text=f"🔑 **MÃ OTP:** `{otp_code}`\n📝 {content}",
+                                text=f"⏰ **SỐ ĐÃ HẾT HẠN**\n\n"
+                                    f"📞 Số `{phone}` đã hết hạn.\n"
+                                    f"❌ Không tìm thấy user để hoàn tiền!",
                                 parse_mode='Markdown'
                             )
+                            rental.status = 'expired'
+                            rental.updated_at = datetime.now()
+                            db.session.commit()
+                            if rental_id in auto_check_tasks:
+                                del auto_check_tasks[rental_id]
+                            return
                         
-                        return
+                        # ===== LƯU SỐ DƯ CŨ =====
+                        old_balance = user.balance
                         
-            elif status in [202, 312]:
-                # Đang chờ OTP
-                pass
-            elif status == 400:
-                with app.app_context():
-                    rental = Rental.query.get(rental_id)
-                    if rental and rental.status == 'waiting':
-                        rental.status = 'expired'
-                        rental.updated_at = datetime.now()
-                        db.session.commit()
+                        # ===== KIỂM TRA CHÉO SỐ DƯ KỲ VỌNG =====
+                        expected_balance = user.balance + refund
                         
-                        await bot.send_message(
-                            chat_id=chat_id,
-                            text=f"⏰ **OTP HẾT HẠN**\n\nSố `{phone}` đã hết hạn.",
-                            parse_mode='Markdown'
-                        )
-                        return
+                        logger.info(f"   Số dư hiện tại: {user.balance}đ")
+                        logger.info(f"   Số dư kỳ vọng: {expected_balance}đ")
                         
-        except Exception as e:
-            logger.error(f"Lỗi auto-check: {e}")
+                        # ===== THỰC HIỆN HOÀN TIỀN =====
+                        user.balance += refund
+                        rental.refunded = True
+                        rental.refund_amount = refund
+                        rental.refunded_at = datetime.now()
+                        
+                        # ===== KIỂM TRA SAU KHI CẬP NHẬT =====
+                        if user.balance == expected_balance:
+                            logger.info(f"✅ AUTO-HOÀN THÀNH CÔNG: {old_balance}đ → {user.balance}đ (+{refund}đ)")
+                            
+                            # Commit thay đổi
+                            rental.status = 'expired'
+                            rental.updated_at = datetime.now()
+                            db.session.commit()
+                            
+                            await bot.send_message(
+                                chat_id=chat_id,
+                                text=f"⏰ **SỐ ĐÃ HẾT HẠN**\n\n"
+                                    f"📞 Số `{phone}` đã hết hạn.\n"
+                                    f"💰 **Đã tự động hoàn lại {refund:,}đ vào tài khoản!**\n"
+                                    f"💵 **Số dư mới:** {user.balance:,}đ",
+                                parse_mode='Markdown'
+                            )
+                            
+                            # Xóa task
+                            if rental_id in auto_check_tasks:
+                                del auto_check_tasks[rental_id]
+                            return
+                        else:
+                            logger.error(f"❌ AUTO-HOÀN SAI: {old_balance} + {refund} = {user.balance} (phải là {expected_balance})")
+                            db.session.rollback()
+                            await bot.send_message(
+                                chat_id=chat_id,
+                                text=f"⏰ **SỐ ĐÃ HẾT HẠN**\n\n"
+                                    f"📞 Số `{phone}` đã hết hạn.\n"
+                                    f"❌ **Lỗi hệ thống, vui lòng liên hệ admin!**",
+                                parse_mode='Markdown'
+                            )
+                            return
+                            
+            except Exception as e:
+                logger.error(f"Lỗi auto-check: {e}")
+                import traceback
+                traceback.print_exc()
+            
+            # ===== CHỜ 5 GIÂY TRƯỚC LẦN KIỂM TRA TIẾP THEO =====
+            await asyncio.sleep(5)
         
-        await asyncio.sleep(5)
-    
-    logger.info(f"⏰ Hết thời gian auto-check cho rental {rental_id}")
-    await bot.send_message(
-        chat_id=chat_id,
-        text=f"⏰ **ĐÃ HẾT THỜI GIAN CHỜ OTP**\n\nSố `{phone}` đã hết hạn.",
-        parse_mode='Markdown'
-    )
-
+        # ===== HẾT 60 LẦN CHECK (5 PHÚT) =====
+        if not processed:
+            with app.app_context():
+                # Kiểm tra lần cuối trước khi thông báo hết hạn
+                rental = Rental.query.get(rental_id)
+                if rental and rental.status == 'waiting' and not rental.refunded:
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=f"⏰ **ĐÃ HẾT THỜI GIAN CHỜ OTP**\n\nSố `{phone}` đã hết hạn.\n"
+                             f"❌ Vui lòng hủy thủ công để được hoàn tiền!",
+                        parse_mode='Markdown'
+                    )
+            
+            if rental_id in auto_check_tasks:
+                del auto_check_tasks[rental_id]
+            
+    except asyncio.CancelledError:
+        logger.info(f"🛑 Task {rental_id} bị hủy")
+        if rental_id in auto_check_tasks:
+            del auto_check_tasks[rental_id]
+        raise
 
 async def rent_view_callback(update: Update, context: Context):
-    """Xem chi tiết số đã thuê - CÓ NÚT THUÊ LẠI"""
+    """Xem chi tiết số đã thuê"""
     query = update.callback_query
     await query.answer()
     
@@ -906,17 +1124,14 @@ async def rent_view_callback(update: Update, context: Context):
 • **Giá thuê:** {rental.price_charged:,}đ
 • **Trạng thái:** {status_text}
 • **Thời gian thuê:** {rental.created_at.strftime('%H:%M:%S %d/%m/%Y')}
-
 """
-        keyboard = []
         
+        keyboard = []
         if rental.status == 'waiting':
             if rental.otp_id:
                 keyboard.append([InlineKeyboardButton("🔍 KIỂM TRA OTP", callback_data=f"rent_check_{rental.otp_id}_{rental.id}")])
             if rental.sim_id:
                 keyboard.append([InlineKeyboardButton("❌ HỦY SỐ", callback_data=f"rent_cancel_{rental.sim_id}_{rental.id}")])
-        
-        # === NÚT THUÊ LẠI CHO SỐ ĐÃ THÀNH CÔNG ===
         elif rental.status == 'success':
             keyboard.append([InlineKeyboardButton(
                 "🔄 THUÊ LẠI SỐ NÀY", 
@@ -956,7 +1171,6 @@ async def rent_reuse_callback(update: Update, context: Context):
             await query.edit_message_text("❌ **KHÔNG TÌM THẤY TÀI KHOẢN**")
             return
         
-        # Kiểm tra số dư (giá mặc định 3000đ)
         price = 3000
         if db_user.balance < price:
             await query.edit_message_text(
@@ -966,7 +1180,6 @@ async def rent_reuse_callback(update: Update, context: Context):
             )
             return
         
-        # Gọi API thuê lại số
         try:
             url = f"{BASE_URL}/sim/reuse_by_phone_api_key"
             params = {
@@ -984,13 +1197,11 @@ async def rent_reuse_callback(update: Update, context: Context):
                 new_otp_id = sim_data.get('otpId')
                 new_sim_id = sim_data.get('simId')
                 
-                # Trừ tiền
                 old_balance = db_user.balance
                 db_user.balance -= price
                 db_user.total_spent += price
                 db_user.total_rentals += 1
                 
-                # Lấy tên dịch vụ
                 service_name = "Unknown"
                 services = await get_services()
                 for sv in services:
@@ -998,7 +1209,6 @@ async def rent_reuse_callback(update: Update, context: Context):
                         service_name = sv['name']
                         break
                 
-                # Tạo rental mới
                 rental = Rental(
                     user_id=user.id,
                     service_id=int(service_id),
@@ -1033,8 +1243,7 @@ async def rent_reuse_callback(update: Update, context: Context):
                     parse_mode='Markdown'
                 )
                 
-                # Auto-check OTP
-                asyncio.create_task(
+                task = asyncio.create_task(
                     auto_check_otp_task(
                         context.bot,
                         chat_id=update.effective_chat.id,
@@ -1045,6 +1254,7 @@ async def rent_reuse_callback(update: Update, context: Context):
                         phone=phone
                     )
                 )
+                auto_check_tasks[rental.id] = task
                 
             else:
                 await query.edit_message_text(
@@ -1059,9 +1269,8 @@ async def rent_reuse_callback(update: Update, context: Context):
                 parse_mode='Markdown'
             )
 
-
 async def rent_cancel_callback(update: Update, context: Context):
-    """Hủy số - HOÀN TIỀN CHÍNH XÁC"""
+    """Hủy số - SIÊU BẢO VỆ CHỐNG CỘNG SAI (ĐÃ CẬP NHẬT)"""
     query = update.callback_query
     await query.answer()
     
@@ -1071,158 +1280,172 @@ async def rent_cancel_callback(update: Update, context: Context):
         rental_id = int(data[3])
     except Exception as e:
         logger.error(f"Lỗi parse cancel: {e}")
-        await query.edit_message_text("❌ **LỖI DỮ LIỆU**\n\nVui lòng thử lại.")
+        await query.edit_message_text("❌ **LỖI DỮ LIỆU**")
         return
     
-    await query.edit_message_text(
-        "⏳ **ĐANG XỬ LÝ HỦY SỐ...**\n\n🤖 Vui lòng chờ trong giây lát.",
-        parse_mode='Markdown'
-    )
+    # ===== LỚP BẢO VỆ 1: KIỂM TRA XEM CÓ ĐANG BỊ AUTO-CHECK XỬ LÝ KHÔNG =====
+    if rental_id in auto_check_tasks:
+        logger.info(f"⏳ Đang có task auto-check cho rental {rental_id}, chờ 0.5s")
+        await asyncio.sleep(0.5)
+        # Kiểm tra lại sau khi chờ
+        if rental_id not in auto_check_tasks:
+            logger.info(f"✅ Task auto-check đã kết thúc, tiếp tục xử lý hủy")
     
+    # ===== LỚP BẢO VỆ 2: KHÓA CẤP ĐỘ RENTAL =====
     with app.app_context():
-        rental = Rental.query.get(rental_id)
+        # Lấy rental với khóa, đồng thời lấy user
+        rental = Rental.query.filter_by(id=rental_id).with_for_update().first()
         
         if not rental:
+            await query.edit_message_text("❌ **KHÔNG TÌM THẤY GIAO DỊCH**")
+            return
+        
+        user = User.query.filter_by(user_id=rental.user_id).with_for_update().first()
+        
+        # ===== LỚP BẢO VỆ 3: KIỂM TRA TRẠNG THÁI HOÀN TIỀN =====
+        if rental.refunded:
+            logger.warning(f"⚠️ CỐ GẮNG HỦY SỐ ĐÃ HOÀN: {rental_id}")
             await query.edit_message_text(
-                "❌ **KHÔNG TÌM THẤY GIAO DỊCH**\n\n"
-                f"Mã giao dịch: {rental_id}\n"
-                f"Vui lòng kiểm tra lại hoặc liên hệ admin.",
+                f"❌ **SỐ NÀY ĐÃ ĐƯỢC HOÀN {rental.refund_amount}đ**\n\n"
+                f"📞 {rental.phone_number}\n"
+                f"⏰ Hoàn lúc: {rental.refunded_at.strftime('%H:%M:%S') if rental.refunded_at else 'N/A'}\n\n"
+                f"✅ Mỗi số chỉ được hoàn 1 lần!",
                 parse_mode='Markdown'
             )
             return
         
-        if rental.status != 'waiting':
-            status_text = {
-                'success': 'đã nhận OTP',
-                'cancelled': 'đã hủy trước đó',
-                'expired': 'đã hết hạn'
-            }.get(rental.status, 'đã xử lý')
-            
-            await query.edit_message_text(
-                f"❌ **KHÔNG THỂ HỦY**\n\n"
-                f"Số này đã {status_text}.\n"
-                f"Không thể hủy và hoàn tiền.",
-                parse_mode='Markdown'
-            )
+        # ===== LỚP BẢO VỆ 4: KIỂM TRA SỐ DƯ HIỆN TẠI =====
+        expected_balance = user.balance + rental.price_charged
+        logger.info(f"💰 KIỂM TRA CHÉO:")
+        logger.info(f"   Số dư hiện tại: {user.balance}đ")
+        logger.info(f"   Tiền hoàn: +{rental.price_charged}đ")
+        logger.info(f"   Số dư sau hoàn: {expected_balance}đ")
+        
+        # ===== LỚP BẢO VỆ 5: KIỂM TRA RENTAL STATUS =====
+        if rental.status == 'success':
+            await query.edit_message_text("❌ **ĐÃ NHẬN OTP**\n\nKhông thể hủy.")
             return
         
-        phone = rental.phone_number or "Không xác định"
-        service_name = rental.service_name or "Không xác định"
-        refund = rental.price_charged
+        # ===== LỚP BẢO VỆ 6: HỦY TASK AUTO-CHECK =====
+        if rental_id in auto_check_tasks:
+            try:
+                auto_check_tasks[rental_id].cancel()
+                logger.info(f"🛑 Đã hủy task auto-check cho rental {rental_id}")
+                await asyncio.sleep(0.5)
+                auto_check_tasks.pop(rental_id, None)
+            except Exception as e:
+                logger.error(f"Lỗi hủy task: {e}")
         
-        user = User.query.filter_by(user_id=rental.user_id).first()
-        
-        if not user:
-            logger.error(f"❌ KHÔNG TÌM THẤY USER với user_id={rental.user_id}")
-            
-            rental.status = 'cancelled'
-            rental.updated_at = datetime.now()
-            db.session.commit()
-            
-            keyboard = [
-                [InlineKeyboardButton("🆕 THUÊ TIẾP", callback_data="menu_rent")],
-                [InlineKeyboardButton("🔙 MENU CHÍNH", callback_data="menu_main")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await query.edit_message_text(
-                f"✅ **HỦY SỐ THÀNH CÔNG (KHÔNG HOÀN TIỀN)**\n\n"
-                f"📞 **Số:** {phone}\n"
-                f"📱 **Dịch vụ:** {service_name}\n\n"
-                f"❌ **KHÔNG TÌM THẤY TÀI KHOẢN**\n"
-                f"Vui lòng liên hệ admin để được hoàn tiền thủ công.",
-                reply_markup=reply_markup,
-                parse_mode='Markdown'
-            )
-            return
-        
+        # ===== LỚP BẢO VỆ 7: GỌI API HỦY SỐ =====
         try:
             url = f"{BASE_URL}/sim/cancel_api_key/{sim_id}?api_key={API_KEY}"
-            logger.info(f"❌ Hủy số sim_id={sim_id}")
             response = requests.get(url, timeout=10)
             api_data = response.json()
             api_success = api_data.get('status') == 200
             
+            # ===== LỚP BẢO VỆ 8: KIỂM TRA LẠI LẦN CUỐI TRƯỚC KHI HOÀN =====
+            # Refresh user để lấy số dư mới nhất
+            db.session.expire_all()
             db.session.refresh(user)
-            before_cancel_balance = user.balance
             
+            # Kiểm tra một lần nữa xem đã hoàn chưa (tránh race condition)
+            if rental.refunded:
+                logger.error(f"❌ PHÁT HIỆN RACE CONDITION: rental {rental_id} đã được hoàn")
+                db.session.rollback()
+                await query.edit_message_text("❌ Giao dịch đã được xử lý trước đó")
+                return
+            
+            old_balance = user.balance
+            refund_amount = rental.price_charged
+            
+            # ===== LỚP BẢO VỆ 9: CẬP NHẬT VỚI CHECK =====
+            # Chỉ cập nhật nếu số dư hiện tại + tiền hoàn = số dư kỳ vọng
+            if user.balance + refund_amount != expected_balance:
+                logger.error(f"❌ PHÁT HIỆN BẤT THƯỜNG:")
+                logger.error(f"   user.balance ({user.balance}) + refund ({refund_amount}) = {user.balance + refund_amount}")
+                logger.error(f"   expected_balance = {expected_balance}")
+                await query.edit_message_text("❌ LỖI HỆ THỐNG: Phát hiện bất thường số dư")
+                return
+            
+            # Cập nhật
             rental.status = 'cancelled'
-            rental.updated_at = datetime.now()
+            rental.refunded = True
+            rental.refund_amount = refund_amount
+            rental.refunded_at = datetime.now()
             
-            user.balance += refund
+            user.balance += refund_amount
+            
+            # ===== LỚP BẢO VỆ 10: LOG CHI TIẾT =====
+            logger.info(f"✅ HOÀN TIỀN THÀNH CÔNG!")
+            logger.info(f"   User: {user.user_id}")
+            logger.info(f"   Rental: {rental_id}")
+            logger.info(f"   Số dư cũ: {old_balance}")
+            logger.info(f"   Tiền hoàn: +{refund_amount}")
+            logger.info(f"   Số dư mới: {user.balance}")
+            logger.info(f"   Expected: {expected_balance}")
+            logger.info(f"   Status: {'MATCH' if user.balance == expected_balance else 'MISMATCH'}")
+            
             db.session.commit()
             
+            # ===== LỚP BẢO VỆ 11: KIỂM TRA SAU COMMIT =====
             db.session.refresh(user)
-            after_cancel_balance = user.balance
+            db.session.refresh(rental)
             
-            logger.info(f"💰 HOÀN {refund}đ CHO USER {user.user_id}")
-            logger.info(f"   Số dư trước hủy: {before_cancel_balance}đ → Sau hủy: {after_cancel_balance}đ (Hoàn: +{refund}đ)")
+            if not rental.refunded or rental.refund_amount != refund_amount:
+                logger.error(f"❌ LỖI NGHIÊM TRỌNG: Dữ liệu không nhất quán sau commit")
             
+            # Gửi thông báo
             keyboard = [
                 [InlineKeyboardButton("🆕 THUÊ TIẾP", callback_data="menu_rent")],
                 [InlineKeyboardButton("💰 XEM SỐ DƯ", callback_data="menu_balance")],
-                [InlineKeyboardButton("🔙 MENU CHÍNH", callback_data="menu_main")]
+                [InlineKeyboardButton("🔙 MENU", callback_data="menu_main")]
             ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            status_text = "✅ **HỦY SỐ THÀNH CÔNG!**" if api_success else "⚠️ **HỦY CỤC BỘ (LỖI API)**"
             
             await query.edit_message_text(
-                f"{status_text}\n\n"
-                f"📞 **Số:** {phone}\n"
-                f"📱 **Dịch vụ:** {service_name}\n"
-                f"💰 **Hoàn tiền:** {refund:,}đ\n"
-                f"💵 **Số dư trước hủy:** {before_cancel_balance:,}đ\n"
-                f"💵 **Số dư sau hủy:** {after_cancel_balance:,}đ\n\n"
-                f"✅ Đã hoàn tiền vào tài khoản của bạn!",
-                reply_markup=reply_markup,
+                f"✅ **HỦY SỐ THÀNH CÔNG!**\n\n"
+                f"📞 **Số:** {rental.phone_number}\n"
+                f"💰 **Hoàn tiền:** {refund_amount:,}đ\n"
+                f"💵 **Số dư mới:** {user.balance:,}đ",
+                reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode='Markdown'
             )
             
         except Exception as e:
-            logger.error(f"❌ Lỗi hủy số: {e}")
-            await query.edit_message_text(
-                f"❌ **LỖI HỦY SỐ**\n\n{str(e)}",
-                parse_mode='Markdown'
-            )
-
-
+            db.session.rollback()
+            logger.error(f"❌ LỖI: {e}")
+            await query.edit_message_text(f"❌ **LỖI**\n\n{str(e)}")
 
 async def rent_list_callback(update: Update, context: Context):
-    """Hiển thị danh sách số đang thuê - CÓ NÚT THUÊ LẠI"""
+    """Hiển thị danh sách số đang thuê - CÓ NÚT HỦY CHO SỐ CHỜ OTP"""
     query = update.callback_query
     await query.answer()
     
     user = update.effective_user
     
     with app.app_context():
-        # Lấy tất cả số đang waiting
-        active_rentals = Rental.query.filter(
+        # ===== SỬA QUAN TRỌNG: Lấy tất cả số 'waiting' không quan tâm hết hạn =====
+        waiting_rentals = Rental.query.filter(
             Rental.user_id == user.id,
-            Rental.status == 'waiting',
-            Rental.expires_at > datetime.now()
+            Rental.status == 'waiting'  # Chỉ cần status waiting, không check expires_at
         ).order_by(Rental.created_at.desc()).all()
         
-        # Lấy số đã success gần đây
         recent_rentals = Rental.query.filter(
             Rental.user_id == user.id,
             Rental.status == 'success'
         ).order_by(Rental.created_at.desc()).limit(10).all()
         
-        # Lấy số đã hủy/hết hạn
         old_rentals = Rental.query.filter(
             Rental.user_id == user.id,
             Rental.status.in_(['cancelled', 'expired'])
         ).order_by(Rental.created_at.desc()).limit(5).all()
     
-    # Xóa menu hiện tại
     if query.message:
         try:
             await query.message.delete()
         except:
             pass
     
-    if not active_rentals and not recent_rentals and not old_rentals:
+    if not waiting_rentals and not recent_rentals and not old_rentals:
         keyboard = [[InlineKeyboardButton("📱 THUÊ SỐ NGAY", callback_data="menu_rent")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await context.bot.send_message(
@@ -1236,24 +1459,40 @@ async def rent_list_callback(update: Update, context: Context):
     text = "📋 **DANH SÁCH SỐ CỦA BẠN**\n\n"
     keyboard = []
     
-    if active_rentals:
-        text += "🟢 **ĐANG HOẠT ĐỘNG:**\n"
-        for rental in active_rentals:
+    # ===== HIỂN THỊ SỐ ĐANG CHỜ OTP (kể cả hết hạn) =====
+    if waiting_rentals:
+        text += "🟢 **ĐANG CHỜ OTP:**\n"
+        for rental in waiting_rentals:
+            # Tính thời gian còn lại
             expires_in = int((rental.expires_at - datetime.now()).total_seconds() / 60)
             if expires_in < 0:
-                expires_in = 0
-            text += f"• `{rental.phone_number}` - {rental.service_name} ⏳{expires_in}p\n"
-            keyboard.append([InlineKeyboardButton(
-                f"📞 {rental.phone_number} - {rental.service_name} (⏳{expires_in}p)",
-                callback_data=f"rent_view_{rental.id}"
-            )])
+                time_display = "Chờ OTP"
+            else:
+                time_display = f"⏳ Còn {expires_in} phút"
+            
+            text += f"• `{rental.phone_number}` - {rental.service_name} ({time_display})\n"
+            
+            # ===== THÊM NÚT HỦY CHO MỖI SỐ =====
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"📞 {rental.phone_number}", 
+                    callback_data=f"rent_view_{rental.id}"
+                ),
+                InlineKeyboardButton(
+                    f"❌ HỦY", 
+                    callback_data=f"rent_cancel_{rental.sim_id}_{rental.id}"
+                )
+            ])
         text += "\n"
     
+    # ===== HIỂN THỊ SỐ ĐÃ NHẬN OTP =====
     if recent_rentals:
         text += "✅ **ĐÃ NHẬN OTP GẦN ĐÂY:**\n"
         for rental in recent_rentals:
-            text += f"• `{rental.phone_number}` - {rental.service_name} - OTP: `{rental.otp_code or 'Audio'}`\n"
-            # THÊM NÚT THUÊ LẠI NGAY TRONG DANH SÁCH
+            otp_display = rental.otp_code or "Audio OTP"
+            text += f"• `{rental.phone_number}` - {rental.service_name} - OTP: {otp_display}\n"
+            
+            # Nút thuê lại
             keyboard.append([
                 InlineKeyboardButton(
                     f"🔄 THUÊ LẠI {rental.phone_number}",
@@ -1262,14 +1501,17 @@ async def rent_list_callback(update: Update, context: Context):
             ])
         text += "\n"
     
+    # ===== HIỂN THỊ SỐ ĐÃ HẾT HẠN/HỦY =====
     if old_rentals:
         text += "⏰ **ĐÃ HẾT HẠN/HỦY:**\n"
         for rental in old_rentals:
             status_icon = "❌" if rental.status == 'cancelled' else "⏰"
             text += f"• {status_icon} `{rental.phone_number}` - {rental.service_name}\n"
     
+    # Nút điều hướng
     keyboard.append([InlineKeyboardButton("🆕 THUÊ SỐ MỚI", callback_data="menu_rent")])
     keyboard.append([InlineKeyboardButton("🔙 MENU CHÍNH", callback_data="menu_main")])
+    
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await context.bot.send_message(
@@ -1278,11 +1520,3 @@ async def rent_list_callback(update: Update, context: Context):
         reply_markup=reply_markup,
         parse_mode='Markdown'
     )
-
-
-
-
-
-
-
-

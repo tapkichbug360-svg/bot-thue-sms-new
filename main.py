@@ -28,7 +28,15 @@ from handlers.rent import (
 from handlers.balance import balance_command
 from handlers.deposit import deposit_command, deposit_amount_callback, deposit_check_callback
 from handlers.callback import menu_callback
+# Đầu file, thêm imports
+from datetime import datetime, timedelta, timezone
 
+# Thêm sau imports
+VN_TZ = timezone(timedelta(hours=7))
+
+def get_vn_time():
+    """Lấy thời gian Việt Nam hiện tại"""
+    return datetime.now(VN_TZ).replace(tzinfo=None)
 # Tạo thư mục database
 db_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'database')
 if not os.path.exists(db_dir):

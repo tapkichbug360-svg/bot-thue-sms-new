@@ -2,7 +2,7 @@
 import logging
 from bot import app
 from database.models import User, Transaction, db
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import os
 import re
 import asyncio
@@ -15,7 +15,14 @@ MB_ACCOUNT = os.getenv('MB_ACCOUNT', '666666291005')
 MB_NAME = os.getenv('MB_NAME', 'NGUYEN THE LAM')
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 
+# Múi giờ Việt Nam (UTC+7)
+VN_TZ = timezone(timedelta(hours=7))
+
 telegram_bot = Bot(token=BOT_TOKEN) if BOT_TOKEN else None
+
+def get_vn_time():
+    """Lấy thời gian Việt Nam hiện tại"""
+    return datetime.now(VN_TZ).replace(tzinfo=None)
 
 async def send_telegram_notification(chat_id, message):
     try:
@@ -59,53 +66,43 @@ def setup_sepay_webhook(app):
             logger.info(f"🔍 Mã NAP: {transaction_code}")
             
             with app.app_context():
-                # BƯỚC 1: Tìm giao dịch pending với mã này
-                transaction = Transaction.query.filter_by(
-                    transaction_code=transaction_code,
-                    status='pending'
+                # ===== KIỂM TRA GIAO DỊCH ĐÃ TỒN TẠI =====
+                existing = Transaction.query.filter_by(
+                    transaction_code=transaction_code
                 ).first()
                 
-                # BƯỚC 2: XÁC ĐỊNH USER - TÌM THEO NHIỀU CÁCH
+                if existing and existing.status == 'success':
+                    logger.warning(f"⚠️ Giao dịch {transaction_code} đã được xử lý trước đó")
+                    return jsonify({
+                        "success": True, 
+                        "message": "Already processed"
+                    }), 200
+                
+                # ===== XÁC ĐỊNH USER =====
                 target_user = None
                 
-                # CÁCH 1: Từ giao dịch pending (QUAN TRỌNG NHẤT)
-                if transaction:
-                    target_user = User.query.get(transaction.user_id)
-                    logger.info(f"✅ Cách 1: Tìm thấy user từ giao dịch pending: {target_user.user_id if target_user else 'None'}")
+                # Cách 1: Từ giao dịch pending
+                if existing and existing.status == 'pending':
+                    target_user = User.query.get(existing.user_id)
+                    logger.info(f"✅ Tìm thấy user từ giao dịch pending: {target_user.user_id if target_user else 'None'}")
                 
-                # CÁCH 2: Tìm user_id trong nội dung
+                # Cách 2: Tìm user_id trong nội dung
                 if not target_user:
                     user_match = re.search(r'tu (\d+)', content)
                     if user_match:
                         found_user_id = int(user_match.group(1))
                         target_user = User.query.filter_by(user_id=found_user_id).first()
                         if target_user:
-                            logger.info(f"✅ Cách 2: Tìm thấy user từ nội dung: {target_user.user_id}")
+                            logger.info(f"✅ Tìm thấy user từ nội dung: {target_user.user_id}")
                 
-                # CÁCH 3: Tìm user từ giao dịch cũ
+                # Cách 3: Tìm user từ database
                 if not target_user:
-                    any_trans = Transaction.query.filter_by(
-                        transaction_code=transaction_code
-                    ).first()
-                    if any_trans:
-                        target_user = User.query.get(any_trans.user_id)
-                        logger.info(f"✅ Cách 3: Tìm thấy user từ giao dịch cũ: {target_user.user_id if target_user else 'None'}")
+                    # Thử tìm user gần đây nhất
+                    target_user = User.query.order_by(User.last_active.desc()).first()
+                    if target_user:
+                        logger.info(f"✅ Tìm thấy user gần đây: {target_user.user_id}")
                 
-                # CÁCH 4: Tìm user từ số điện thoại trong nội dung
-                if not target_user:
-                    numbers = re.findall(r'\d+', content)
-                    for num in numbers:
-                        if len(num) >= 9:
-                            try:
-                                potential_user = User.query.filter_by(user_id=int(num)).first()
-                                if potential_user:
-                                    target_user = potential_user
-                                    logger.info(f"✅ Cách 4: Tìm thấy user từ số {num}: {target_user.user_id}")
-                                    break
-                            except:
-                                pass
-                
-                # NẾU VẪN KHÔNG TÌM THẤY, TẠO USER MỚI TỪ MÃ GD
+                # Cách 4: Tạo user mới nếu không tìm thấy
                 if not target_user:
                     hash_obj = hashlib.md5(transaction_code.encode())
                     new_user_id = int(hash_obj.hexdigest()[:8], 16) % 1000000000
@@ -114,70 +111,89 @@ def setup_sepay_webhook(app):
                         user_id=new_user_id,
                         username=f"user_{transaction_code[:4]}",
                         balance=0,
-                        created_at=datetime.now(),
-                        last_active=datetime.now()
+                        created_at=get_vn_time(),
+                        last_active=get_vn_time()
                     )
                     db.session.add(target_user)
                     db.session.flush()
-                    logger.info(f"🆕 Cách 5: TẠO USER MỚI TỪ MÃ GD: {target_user.user_id}")
+                    logger.info(f"🆕 TẠO USER MỚI: {target_user.user_id}")
                 
-                # BƯỚC 3: XỬ LÝ GIAO DỊCH
-                if not transaction:
+                # ===== TẠO HOẶC CẬP NHẬT GIAO DỊCH =====
+                if not existing:
                     transaction = Transaction(
                         user_id=target_user.id,
                         amount=amount,
                         type='deposit',
                         status='pending',
                         transaction_code=transaction_code,
-                        description=f"Auto-created from webhook",
-                        created_at=datetime.now()
+                        description=f"NAP qua SePay",
+                        created_at=get_vn_time()
                     )
                     db.session.add(transaction)
                     db.session.flush()
-                    logger.info(f"✅ ĐÃ TẠO GIAO DỊCH MỚI: {transaction_code} cho user {target_user.user_id}")
+                    logger.info(f"✅ TẠO GIAO DỊCH MỚI: {transaction_code}")
+                else:
+                    transaction = existing
                 
-                # KIỂM TRA SỐ TIỀN
+                # ===== KIỂM TRA SỐ TIỀN =====
                 if abs(transaction.amount - amount) > 5000:
-                    logger.error(f"❌ Số tiền không khớp: {amount} != {transaction.amount}")
-                    return jsonify({"success": True, "message": "Amount mismatch"}), 200
+                    logger.error(f"❌ Số tiền không khớp: webhook={amount}, db={transaction.amount}")
+                    # Cập nhật số tiền đúng từ webhook
+                    transaction.amount = amount
+                    logger.info(f"✅ Đã cập nhật số tiền: {amount}đ")
                 
-                # CỘNG TIỀN
+                # ===== CẬP NHẬT TRẠNG THÁI =====
                 old_balance = target_user.balance
-                target_user.balance += transaction.amount
+                target_user.balance += amount
                 transaction.status = 'success'
-                transaction.updated_at = datetime.now()
+                transaction.updated_at = get_vn_time()
+                target_user.last_active = get_vn_time()
                 
-                db.session.commit()
-                
-                logger.info("✅ NẠP TIỀN THÀNH CÔNG!")
-                logger.info(f"👤 User: {target_user.user_id} - {target_user.username}")
-                logger.info(f"💰 Số dư: {old_balance:,}đ → {target_user.balance:,}đ")
-                logger.info(f"📝 Mã GD: {transaction_code}")
-                
-                # Gửi thông báo Telegram
-                if BOT_TOKEN:
-                    try:
-                        message = (
-                            f"💰 **NẠP TIỀN THÀNH CÔNG!**\n\n"
-                            f"• **Số tiền:** `{transaction.amount:,}đ`\n"
-                            f"• **Mã GD:** `{transaction_code}`\n"
-                            f"• **Số dư mới:** `{target_user.balance:,}đ`"
-                        )
-                        asyncio.run(send_telegram_notification(target_user.user_id, message))
-                    except Exception as e:
-                        logger.error(f"❌ Lỗi gửi Telegram: {e}")
+                # ===== COMMIT =====
+                try:
+                    db.session.commit()
+                    logger.info(f"✅ COMMIT THÀNH CÔNG!")
+                    logger.info(f"👤 User: {target_user.user_id}")
+                    logger.info(f"💰 Số dư cũ: {old_balance:,}đ")
+                    logger.info(f"💰 Số tiền nạp: +{amount:,}đ")
+                    logger.info(f"💰 Số dư mới: {target_user.balance:,}đ")
+                    logger.info(f"⏰ Thời gian: {get_vn_time().strftime('%H:%M:%S %d/%m/%Y')}")
+                    
+                    # Gửi thông báo Telegram
+                    if BOT_TOKEN:
+                        try:
+                            message = (
+                                f"💰 **NẠP TIỀN THÀNH CÔNG!**\n\n"
+                                f"• **Số tiền:** `{amount:,}đ`\n"
+                                f"• **Mã GD:** `{transaction_code}`\n"
+                                f"• **Số dư cũ:** `{old_balance:,}đ`\n"
+                                f"• **Số dư mới:** `{target_user.balance:,}đ`\n"
+                                f"• **Thời gian:** `{get_vn_time().strftime('%H:%M:%S %d/%m/%Y')}`"
+                            )
+                            asyncio.run(send_telegram_notification(target_user.user_id, message))
+                        except Exception as e:
+                            logger.error(f"❌ Lỗi gửi Telegram: {e}")
+                    
+                except Exception as e:
+                    db.session.rollback()
+                    logger.error(f"❌ LỖI COMMIT: {e}")
+                    return jsonify({"success": False, "error": "Database error"}), 500
                 
                 return jsonify({
                     "success": True,
                     "message": "Deposit processed successfully",
                     "data": {
                         "user_id": target_user.user_id,
-                        "amount": transaction.amount,
+                        "old_balance": old_balance,
+                        "amount": amount,
                         "new_balance": target_user.balance,
-                        "transaction_code": transaction_code
+                        "transaction_code": transaction_code,
+                        "time": get_vn_time().isoformat()
                     }
                 }), 200
-            
+                
         except Exception as e:
             logger.error(f"❌ LỖI WEBHOOK: {e}")
+            import traceback
+            traceback.print_exc()
             return jsonify({"success": False, "error": str(e)}), 500

@@ -3,6 +3,15 @@ import requests
 import time
 import os
 from datetime import datetime
+# Đầu file, thêm imports
+from datetime import datetime, timedelta, timezone
+
+# Thêm sau imports
+VN_TZ = timezone(timedelta(hours=7))
+
+def get_vn_time():
+    """Lấy thời gian Việt Nam hiện tại"""
+    return datetime.now(VN_TZ).replace(tzinfo=None)
 
 RENDER_URL = "https://bot-thue-sms-v2.onrender.com"
 

@@ -1,11 +1,20 @@
 ﻿from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-
 from telegram.ext import CallbackContext as Context
 from database.models import User, Rental, db
 from datetime import datetime
 import logging
 import os
 import requests
+import asyncio
+# Đầu file, thêm imports
+from datetime import datetime, timedelta, timezone
+
+# Thêm sau imports
+VN_TZ = timezone(timedelta(hours=7))
+
+def get_vn_time():
+    """Lấy thời gian Việt Nam hiện tại"""
+    return datetime.now(VN_TZ).replace(tzinfo=None)
 
 logger = logging.getLogger(__name__)
 
@@ -14,53 +23,127 @@ MB_NAME = os.getenv('MB_NAME', 'NGUYEN THE LAM')
 RENDER_URL = os.getenv('RENDER_URL', 'https://bot-thue-sms-v2.onrender.com')
 
 async def sync_balance_with_render(user_id):
-    """Đồng bộ số dư từ Render về local"""
+    """Đồng bộ số dư với Render - CHỈ LẤY SỐ CAO HƠN"""
     try:
+        # Gọi API lấy số dư từ Render
         response = requests.post(
-            f"{RENDER_URL}/api/force-sync-user",
+            f"{RENDER_URL}/api/get-user-balance",
             json={'user_id': user_id},
-            timeout=5
+            timeout=10
         )
         
         if response.status_code == 200:
             data = response.json()
-            render_balance = data['balance']
+            render_balance = data.get('balance')
             
-            with app.app_context():
-                user = User.query.filter_by(user_id=user_id).first()
-                if user and user.balance != render_balance:
-                    old_balance = user.balance
-                    user.balance = render_balance
-                    
-                    # Cập nhật các giao dịch
-                    for trans in data['transactions']:
-                        from database.models import Transaction
-                        transaction = Transaction.query.filter_by(
-                            transaction_code=trans['code']
-                        ).first()
-                        if transaction:
-                            transaction.status = trans['status']
-                            transaction.updated_at = datetime.now()
-                    
-                    db.session.commit()
-                    logger.info(f"✅ Đồng bộ user {user_id}: {old_balance}đ → {render_balance}đ")
-                    return True
-            return True
-        return False
+            if render_balance is not None:
+                with app.app_context():
+                    user = User.query.filter_by(user_id=user_id).first()
+                    if user:
+                        old_balance = user.balance
+                        
+                        # ==== QUAN TRỌNG: CHỈ CẬP NHẬT KHI RENDER CAO HƠN ====
+                        if render_balance > user.balance:
+                            logger.info(f"💰 Render cao hơn: {render_balance}đ > {user.balance}đ -> Cập nhật")
+                            user.balance = render_balance
+                            
+                            # Cập nhật các giao dịch
+                            if 'transactions' in data:
+                                from database.models import DepositTransaction
+                                for trans_data in data['transactions']:
+                                    transaction = DepositTransaction.query.filter_by(
+                                        transaction_id=trans_data['code']
+                                    ).first()
+                                    if transaction and transaction.status != 'completed':
+                                        transaction.status = trans_data['status']
+                                        transaction.processed_at = datetime.now()
+                            
+                            db.session.commit()
+                            logger.info(f"✅ Đồng bộ user {user_id}: {old_balance}đ → {render_balance}đ")
+                            return True
+                            
+                        elif render_balance < user.balance:
+                            # Render thấp hơn -> push local lên Render
+                            logger.info(f"⚠️ Render thấp hơn: {render_balance}đ < {user.balance}đ -> Push local")
+                            asyncio.create_task(push_user_balance_to_render(
+                                user_id, 
+                                user.balance, 
+                                user.username or f"user_{user_id}"
+                            ))
+                        else:
+                            logger.info(f"✅ Số dư đồng bộ: {user.balance}đ")
+                    else:
+                        logger.warning(f"⚠️ Không tìm thấy user {user_id} trong database")
+            else:
+                logger.warning(f"⚠️ Render trả về balance = null cho user {user_id}")
+        else:
+            logger.warning(f"⚠️ Render API trả về {response.status_code}")
+            
+    except requests.exceptions.Timeout:
+        logger.warning(f"⏰ Timeout khi lấy balance từ Render cho user {user_id}")
+    except requests.exceptions.ConnectionError:
+        logger.warning(f"🔌 Lỗi kết nối Render cho user {user_id}")
     except Exception as e:
-        logger.error(f"❌ Lỗi đồng bộ user {user_id}: {e}")
+        logger.error(f"❌ Lỗi đồng bộ balance user {user_id}: {e}")
+    
+    return False
+
+async def push_user_balance_to_render(user_id, balance, username):
+    """Push số dư local lên Render"""
+    try:
+        response = requests.post(
+            f"{RENDER_URL}/api/update-balance",
+            json={
+                'user_id': user_id,
+                'balance': balance,
+                'username': username
+            },
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            logger.info(f"✅ Đã push balance {balance}đ cho user {user_id} lên Render")
+            return True
+        else:
+            logger.warning(f"⚠️ Push balance thất bại: {response.status_code}")
+            
+    except requests.exceptions.Timeout:
+        logger.warning(f"⏰ Timeout push balance user {user_id}")
+    except Exception as e:
+        logger.error(f"❌ Lỗi push balance user {user_id}: {e}")
+    
+    return False
+
+async def push_user_to_render(user_id, username):
+    """Đẩy user mới lên Render"""
+    try:
+        response = requests.post(
+            f"{RENDER_URL}/api/check-user",
+            json={'user_id': user_id, 'username': username},
+            timeout=10
+        )
+        if response.status_code == 200:
+            logger.info(f"✅ Đã push user {user_id} lên Render thành công")
+            return True
+        else:
+            logger.warning(f"⚠️ Push user {user_id} thất bại: {response.status_code}")
+            return False
+    except Exception as e:
+        logger.error(f"❌ Lỗi push user {user_id}: {e}")
         return False
 
 async def start_command(update: Update, context: Context):
     """Xử lý lệnh /start"""
     user = update.effective_user
+    username = user.username or user.first_name or f"user_{user.id}"
     
     with app.app_context():
         existing_user = User.query.filter_by(user_id=user.id).first()
+        
         if not existing_user:
             new_user = User(
                 user_id=user.id,
-                username=user.username or user.first_name,
+                username=username,
                 balance=0,
                 created_at=datetime.now(),
                 last_active=datetime.now()
@@ -70,22 +153,28 @@ async def start_command(update: Update, context: Context):
             logger.info(f"🆕 Người dùng mới: {user.id} - {user.first_name}")
             
             # Push user mới lên Render
-            try:
-                push_response = requests.post(
-                    f"{RENDER_URL}/api/check-user",
-                    json={'user_id': user.id, 'username': user.username or user.first_name},
-                    timeout=5
-                )
-                logger.info(f"✅ Đã push user mới lên Render: {push_response.status_code}")
-            except:
-                pass
-        else:
-            existing_user.last_active = datetime.now()
-            db.session.commit()
-            logger.info(f"👤 Người dùng cũ: {user.id} - {user.first_name}")
+            asyncio.create_task(push_user_to_render(user.id, username))
             
-            # Đồng bộ số dư từ Render
+            current_balance = 0
+        else:
+            # Lưu số dư cũ
+            old_balance = existing_user.balance
+            logger.info(f"👤 Người dùng cũ: {user.id} - {user.first_name} - Số dư local: {old_balance}đ")
+            
+            # Cập nhật thời gian hoạt động và username
+            existing_user.last_active = datetime.now()
+            existing_user.username = username
+            db.session.commit()
+            
+            # Đồng bộ số dư với Render (chỉ lấy số cao hơn)
             await sync_balance_with_render(user.id)
+            
+            # Lấy lại số dư sau khi đồng bộ
+            db.session.refresh(existing_user)
+            current_balance = existing_user.balance
+            
+            if old_balance != current_balance:
+                logger.info(f"💰 Đồng bộ user {user.id}: {old_balance}đ → {current_balance}đ")
     
     # Tạo keyboard menu chính
     keyboard = [
@@ -101,6 +190,7 @@ async def start_command(update: Update, context: Context):
     
     welcome_msg = (
         f"🎉 **Chào mừng {user.first_name} đến với Bot Thuê SMS!**\n\n"
+        f"💰 **Số dư hiện tại:** {current_balance:,}đ\n\n"
         f"🤖 Bot cung cấp dịch vụ thuê số điện thoại ảo:\n"
         f"• Facebook • Google • Tiktok • Shopee • Các dịch vụ khác\n\n"
         f"⚠️ **TUÂN THỦ PHÁP LUẬT:**\n"
@@ -246,7 +336,7 @@ async def check_command(update: Update, context: Context):
             response = requests.post(
                 f"{RENDER_URL}/api/check-transaction",
                 json={'code': code},
-                timeout=5
+                timeout=10
             )
             
             if response.status_code == 200:
@@ -260,10 +350,12 @@ async def check_command(update: Update, context: Context):
                     
                     # Kiểm tra thêm trên local để xác nhận
                     with app.app_context():
-                        from database.models import Transaction, User
-                        local_trans = Transaction.query.filter_by(transaction_code=code).first()
+                        from database.models import DepositTransaction, User
+                        local_trans = DepositTransaction.query.filter_by(
+                            transaction_id=code
+                        ).first()
                         if local_trans:
-                            user = User.query.get(local_trans.user_id)
+                            user = User.query.filter_by(user_id=local_trans.user_id).first()
                             local_status = local_trans.status
                             local_balance = user.balance if user else 0
                         else:
@@ -282,23 +374,23 @@ async def check_command(update: Update, context: Context):
                     )
                 else:
                     await update.message.reply_text(
-                        f"❌ **KHÔNG TÌM THẤY**\n\nMã giao dịch `{code}` không tồn tại trong hệ thống.",
+                        f"❌ **KHÔNG TÌM THẤY**\n\nMã giao dịch `{code}` không tồn tại.",
                         parse_mode='Markdown'
                     )
             else:
                 await update.message.reply_text(
-                    f"⚠️ **LỖI KẾT NỐI**\n\nKhông thể kiểm tra trạng thái. Vui lòng thử lại sau.",
+                    f"⚠️ **LỖI KẾT NỐI**\n\nKhông thể kiểm tra trạng thái.",
                     parse_mode='Markdown'
                 )
         except requests.exceptions.ConnectionError:
             await update.message.reply_text(
-                "⚠️ **LỖI KẾT NỐI**\n\nKhông thể kết nối đến server Render. Vui lòng thử lại sau.",
+                "⚠️ **LỖI KẾT NỐI**\n\nKhông thể kết nối đến server Render.",
                 parse_mode='Markdown'
             )
         except Exception as e:
             logger.error(f"Lỗi check status: {e}")
             await update.message.reply_text(
-                f"⚠️ **LỖI**\n\nKhông thể kiểm tra trạng thái. Vui lòng thử lại sau.",
+                f"⚠️ **LỖI**\n\nKhông thể kiểm tra trạng thái.",
                 parse_mode='Markdown'
             )
             
@@ -362,8 +454,6 @@ async def balance_command(update: Update, context: Context):
                 parse_mode='Markdown'
             )
 
-
-
 async def history_command(update: Update, context: Context):
     """Xem lịch sử giao dịch"""
     user = update.effective_user
@@ -402,7 +492,6 @@ async def history_command(update: Update, context: Context):
         
         await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
 
-
 async def cancel_command(update: Update, context: Context):
     """Hủy thao tác hiện tại"""
     # Xóa user_data
@@ -416,8 +505,6 @@ async def cancel_command(update: Update, context: Context):
         reply_markup=reply_markup,
         parse_mode='Markdown'
     )
-
-# Import app từ bot - để cuối file tránh circular import
 
 # Import app từ bot - để cuối file tránh circular import
 from bot import app

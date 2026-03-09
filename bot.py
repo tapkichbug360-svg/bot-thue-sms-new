@@ -5,9 +5,19 @@ import asyncio
 import signal
 import psutil
 import requests
+from datetime import datetime, timedelta
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler
 from flask import Flask
-from database.models import db, User, Transaction
+from database.models import db, User, Transaction, DepositTransaction, PushedTransaction
+# Đầu file, thêm imports
+from datetime import datetime, timedelta, timezone
+
+# Thêm sau imports
+VN_TZ = timezone(timedelta(hours=7))
+
+def get_vn_time():
+    """Lấy thời gian Việt Nam hiện tại"""
+    return datetime.now(VN_TZ).replace(tzinfo=None)
 
 # === ĐỌC TRỰC TIẾP TẤT CẢ BIẾN TỪ FILE .ENV ===
 print("📁 Đang đọc file .env...")
@@ -15,6 +25,10 @@ print("📁 Đang đọc file .env...")
 BOT_TOKEN = None
 API_KEY = None
 BASE_URL = None
+ADMIN_ID = None
+MB_ACCOUNT = None
+MB_NAME = None
+RENDER_URL = None
 
 if os.path.exists('.env'):
     with open('.env', 'r', encoding='utf-8') as f:
@@ -41,6 +55,9 @@ if os.path.exists('.env'):
                     MB_ACCOUNT = value
                 elif key == 'MB_NAME':
                     MB_NAME = value
+                elif key == 'RENDER_URL':
+                    RENDER_URL = value
+                    print(f"   ✅ RENDER_URL: {value}")
 
 # Kiểm tra các biến quan trọng
 if not BOT_TOKEN:
@@ -56,7 +73,10 @@ if not BASE_URL:
 print("✅ Đã đọc tất cả biến môi trường thành công!")
 
 # Cấu hình logging
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
 # === DATABASE ===
@@ -70,9 +90,14 @@ logger.info(f"✅ Database path: {db_path}")
 
 # Import handlers
 try:
-    from handlers.start import start_command, menu_command, cancel, help_command, check_command, history_command, cancel_command
-    from handlers.balance import balance_command
-    from handlers.deposit import deposit_command, deposit_amount_callback, deposit_check_callback
+    from handlers.start import (
+        start_command, menu_command, cancel, help_command, 
+        check_command, history_command, cancel_command,
+        balance_command
+    )
+    from handlers.deposit import (
+        deposit_command, deposit_amount_callback, deposit_check_callback
+    )
     from handlers.rent import (
         rent_command, rent_service_callback, rent_network_callback,
         rent_confirm_callback, rent_check_callback, rent_cancel_callback,
@@ -82,9 +107,12 @@ try:
     logger.info("✅ Import handlers thành công")
 except Exception as e:
     logger.error(f"❌ LỖI IMPORT HANDLERS: {e}")
+    import traceback
+    traceback.print_exc()
     sys.exit(1)
 
 def kill_other_instances():
+    """Kill các instance bot khác đang chạy"""
     current_pid = os.getpid()
     killed = 0
     try:
@@ -104,6 +132,7 @@ def kill_other_instances():
     return killed
 
 def cleanup_telegram():
+    """Dọn dẹp kết nối Telegram cũ"""
     try:
         close_url = f"https://api.telegram.org/bot{BOT_TOKEN}/close"
         close_res = requests.post(close_url)
@@ -115,66 +144,31 @@ def cleanup_telegram():
     except Exception as e:
         logger.error(f"Cleanup error: {e}")
 
-async def main():
-    killed = kill_other_instances()
-    if killed > 0:
-        logger.info(f"Đã kill {killed} instance cũ")
-    cleanup_telegram()
-    
-    try:
-        logger.info("🚀 BOT ĐANG KHỞI ĐỘNG...")
+async def cleanup_old_data():
+    """Dọn dẹp dữ liệu cũ mỗi giờ"""
+    with app.app_context():
+        # Đánh dấu giao dịch pending quá 24h là expired
+        old_pending = DepositTransaction.query.filter(
+            DepositTransaction.status == 'pending',
+            DepositTransaction.created_at < datetime.now() - timedelta(hours=24)
+        ).all()
         
-        with app.app_context():
-            try:
-                user_count = User.query.count()
-                logger.info(f"✅ Kết nối database thành công! Số user: {user_count}")
-            except Exception as e:
-                logger.error(f"❌ Lỗi kết nối database: {e}")
+        for trans in old_pending:
+            trans.status = 'expired'
+            logger.info(f"⏰ Đánh dấu hết hạn GD cũ: {trans.transaction_id}")
         
-        application = Application.builder().token(BOT_TOKEN).connect_timeout(30).read_timeout(30).build()
+        # Xóa pushed transaction cũ quá 7 ngày
+        old_pushed = PushedTransaction.query.filter(
+            PushedTransaction.pushed_at < datetime.now() - timedelta(days=7)
+        ).all()
         
-        application.add_handler(CommandHandler("start", start_command))
-        application.add_handler(CommandHandler("balance", balance_command))
-        application.add_handler(CommandHandler("deposit", deposit_command))
-        application.add_handler(CommandHandler("rent", rent_command))
-        application.add_handler(CommandHandler('check', check_command))
-        application.add_handler(CommandHandler('cancel', cancel_command))
-        application.add_handler(CommandHandler('help', help_command))
-        application.add_handler(CommandHandler('history', history_command))
+        for pushed in old_pushed:
+            db.session.delete(pushed)
         
-        application.add_handler(CallbackQueryHandler(menu_callback, pattern="^menu_"))
-        application.add_handler(CallbackQueryHandler(deposit_amount_callback, pattern="^deposit_amount_"))
-        application.add_handler(CallbackQueryHandler(deposit_check_callback, pattern="^deposit_check_"))
-        application.add_handler(CallbackQueryHandler(rent_service_callback, pattern="^rent_service_"))
-        application.add_handler(CallbackQueryHandler(rent_network_callback, pattern="^rent_network_"))
-        application.add_handler(CallbackQueryHandler(rent_confirm_callback, pattern="^rent_confirm_"))
-        application.add_handler(CallbackQueryHandler(rent_check_callback, pattern="^rent_check_"))
-        application.add_handler(CallbackQueryHandler(rent_cancel_callback, pattern="^rent_cancel_"))
-        application.add_handler(CallbackQueryHandler(rent_view_callback, pattern="^rent_view_"))
-        application.add_handler(CallbackQueryHandler(rent_reuse_callback, pattern='^rent_reuse_'))
-        
-        logger.info("✅ BOT KHỞI ĐỘNG THÀNH CÔNG!")
-        
-        await application.initialize()
-        await application.start()
-        await application.updater.start_polling()
-        
-        while True:
-            await asyncio.sleep(1)
-            
-    except Exception as e:
-        logger.error(f"❌ LỖI: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+        if old_pending or old_pushed:
+            db.session.commit()
+            logger.info(f"🧹 Đã dọn dẹp: {len(old_pending)} GD pending, {len(old_pushed)} pushed cũ")
 
-if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("👋 Bot đã dừng")
-    except Exception as e:
-        logger.error(f"❌ LỖI: {e}")
 async def set_bot_commands(application):
     """Thiết lập menu commands cho bot"""
     commands = [
@@ -192,6 +186,7 @@ async def set_bot_commands(application):
     logger.info("✅ Đã thiết lập menu commands")
 
 async def main():
+    """Hàm chính khởi động bot"""
     killed = kill_other_instances()
     if killed > 0:
         logger.info(f"Đã kill {killed} instance cũ")
@@ -200,12 +195,15 @@ async def main():
     try:
         logger.info("🚀 BOT ĐANG KHỞI ĐỘNG...")
         
+        # Kiểm tra database
         with app.app_context():
             try:
+                db.create_all()
                 user_count = User.query.count()
                 logger.info(f"✅ Kết nối database thành công! Số user: {user_count}")
             except Exception as e:
                 logger.error(f"❌ Lỗi kết nối database: {e}")
+                sys.exit(1)
         
         # Tạo application
         application = Application.builder().token(BOT_TOKEN).build()
@@ -238,10 +236,22 @@ async def main():
         
         logger.info("✅ BOT KHỞI ĐỘNG THÀNH CÔNG!")
         
+        # Khởi động scheduler - CHỈ GIỮ CLEANUP
+        from apscheduler.schedulers.asyncio import AsyncIOScheduler
+        scheduler = AsyncIOScheduler()
+        
+        # CHỈ thêm job dọn dẹp
+        scheduler.add_job(cleanup_old_data, 'interval', hours=1)
+        
+        scheduler.start()
+        logger.info("✅ Scheduler started (chỉ cleanup)")
+        
+        # Khởi động bot
         await application.initialize()
         await application.start()
         await application.updater.start_polling()
         
+        # Giữ bot chạy
         while True:
             await asyncio.sleep(1)
             
@@ -251,5 +261,12 @@ async def main():
         traceback.print_exc()
         sys.exit(1)
 
-
-
+if __name__ == '__main__':
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("👋 Bot đã dừng")
+    except Exception as e:
+        logger.error(f"❌ LỖI: {e}")
+        import traceback
+        traceback.print_exc()
