@@ -30,68 +30,27 @@ from handlers.balance import balance_command
 from handlers.deposit import deposit_command, deposit_amount_callback, deposit_check_callback
 from handlers.callback import menu_callback
 
-# ===== ĐỌC BIẾN MÔI TRƯỜNG ĐƠN GIẢN =====
-print("🔍 ĐANG ĐỌC BIẾN MÔI TRƯỜNG...")
+# ===== ĐỌC BIẾN MÔI TRƯỜNG =====
+import os
+from dotenv import load_dotenv
 
-BOT_TOKEN = None
-API_KEY = None
-BASE_URL = None
-ADMIN_ID = None
-MB_ACCOUNT = None
-MB_NAME = None
-MB_BIN = None
-SEPAY_TOKEN = None
-RENDER_URL = None
+# Load file .env nếu có (cho local)
+load_dotenv()
 
-# Đọc từ biến môi trường hệ thống (Render)
+# Đọc từ biến môi trường (Render)
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 API_KEY = os.getenv('API_KEY')
 BASE_URL = os.getenv('BASE_URL')
 ADMIN_ID = os.getenv('ADMIN_ID')
-MB_ACCOUNT = os.getenv('MB_ACCOUNT')
-MB_NAME = os.getenv('MB_NAME')
-MB_BIN = os.getenv('MB_BIN')
+MB_ACCOUNT = os.getenv('MB_ACCOUNT', '666666291005')
+MB_NAME = os.getenv('MB_NAME', 'NGUYEN THE LAM')
+MB_BIN = os.getenv('MB_BIN', '970422')
 SEPAY_TOKEN = os.getenv('SEPAY_TOKEN')
 RENDER_URL = os.getenv('RENDER_URL')
 
-# Fallback: đọc từ file .env nếu chạy local
-if not BOT_TOKEN and os.path.exists('.env'):
-    print("📁 Đọc file .env (local mode)...")
-    from dotenv import load_dotenv
-    load_dotenv()
-    BOT_TOKEN = os.getenv('BOT_TOKEN')
-    API_KEY = os.getenv('API_KEY')
-    BASE_URL = os.getenv('BASE_URL')
-    ADMIN_ID = os.getenv('ADMIN_ID')
-    MB_ACCOUNT = os.getenv('MB_ACCOUNT')
-    MB_NAME = os.getenv('MB_NAME')
-    MB_BIN = os.getenv('MB_BIN')
-    SEPAY_TOKEN = os.getenv('SEPAY_TOKEN')
-    RENDER_URL = os.getenv('RENDER_URL')
-
-# Kiểm tra biến quan trọng
+# Kiểm tra biến bắt buộc
 if not BOT_TOKEN:
     print("❌ KHÔNG TÌM THẤY BOT_TOKEN")
-    print("📋 Các biến môi trường hiện có:")
-    for key in os.environ.keys():
-        print(f"   - {key}")
-    sys.exit(1)
-
-if not API_KEY:
-    print("❌ KHÔNG TÌM THẤY API_KEY")
-    sys.exit(1)
-if not BASE_URL:
-    print("❌ KHÔNG TÌM THẤY BASE_URL")
-    sys.exit(1)
-
-print("✅ Đã đọc tất cả biến môi trường thành công!")
-print(f"✅ BOT_TOKEN: {BOT_TOKEN[:10]}...")
-print(f"✅ API_KEY: {API_KEY[:10]}...")
-print(f"✅ BASE_URL: {BASE_URL}")
-
-# Kiểm tra các biến quan trọng
-if not BOT_TOKEN:
-    print("❌ KHÔNG TÌM THẤY BOT_TOKEN (ĐÃ THỬ 5 CÁCH)")
     print("📋 Các biến môi trường hiện có:")
     for key in os.environ.keys():
         print(f"   - {key}")
