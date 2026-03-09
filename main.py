@@ -30,14 +30,40 @@ from handlers.balance import balance_command
 from handlers.deposit import deposit_command, deposit_amount_callback, deposit_check_callback
 from handlers.callback import menu_callback
 
-# === CÁCH 1: ĐỌC TRỰC TIẾP TỪ FILE .ENV ===
-print("📁 Đang đọc file .env...")
+# ===== 5 CÁCH ĐỌC BIẾN MÔI TRƯỜNG - TĂNG TỐI ĐA KHẢ NĂNG TÌM THẤY TOKEN =====
+print("🔍 ĐANG TÌM KIẾM BIẾN MÔI TRƯỜNG (5 CÁCH)...")
 
 BOT_TOKEN = None
 API_KEY = None
 BASE_URL = None
+ADMIN_ID = None
+MB_ACCOUNT = None
+MB_NAME = None
+MB_BIN = None
+SEPAY_TOKEN = None
+RENDER_URL = None
 
-if os.path.exists('.env'):
+# === CÁCH 1: Load từ dotenv (ưu tiên cao nhất) ===
+load_dotenv()
+print("✅ Cách 1: Đã load dotenv")
+
+# === CÁCH 2: Đọc từ biến môi trường hệ thống ===
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+API_KEY = os.getenv('API_KEY')
+BASE_URL = os.getenv('BASE_URL')
+ADMIN_ID = os.getenv('ADMIN_ID')
+MB_ACCOUNT = os.getenv('MB_ACCOUNT')
+MB_NAME = os.getenv('MB_NAME')
+MB_BIN = os.getenv('MB_BIN')
+SEPAY_TOKEN = os.getenv('SEPAY_TOKEN')
+RENDER_URL = os.getenv('RENDER_URL')
+
+if BOT_TOKEN:
+    print("✅ Cách 2: Tìm thấy BOT_TOKEN từ biến môi trường")
+
+# === CÁCH 3: Đọc trực tiếp từ file .env (nếu chưa có) ===
+if not BOT_TOKEN and os.path.exists('.env'):
+    print("📁 Cách 3: Đọc trực tiếp từ file .env...")
     with open('.env', 'r', encoding='utf-8') as f:
         for line in f:
             line = line.strip()
@@ -47,32 +73,59 @@ if os.path.exists('.env'):
                 key, value = line.split('=', 1)
                 value = value.strip()
                 os.environ[key] = value
-                if key == 'BOT_TOKEN':
+                if key == 'BOT_TOKEN' and not BOT_TOKEN:
                     BOT_TOKEN = value
-                    print(f"   ✅ BOT_TOKEN: {value[:10]}...")
-                elif key == 'API_KEY':
+                    print(f"   ✅ Tìm thấy BOT_TOKEN từ file .env: {value[:10]}...")
+                elif key == 'API_KEY' and not API_KEY:
                     API_KEY = value
-                    print(f"   ✅ API_KEY: {value[:10]}...")
-                elif key == 'BASE_URL':
+                elif key == 'BASE_URL' and not BASE_URL:
                     BASE_URL = value
-                    print(f"   ✅ BASE_URL: {value}")
-                elif key == 'ADMIN_ID':
+                elif key == 'ADMIN_ID' and not ADMIN_ID:
                     ADMIN_ID = value
-                elif key == 'MB_ACCOUNT':
+                elif key == 'MB_ACCOUNT' and not MB_ACCOUNT:
                     MB_ACCOUNT = value
-                elif key == 'MB_NAME':
+                elif key == 'MB_NAME' and not MB_NAME:
                     MB_NAME = value
-                elif key == 'MB_BIN':
+                elif key == 'MB_BIN' and not MB_BIN:
                     MB_BIN = value
-                elif key == 'SEPAY_TOKEN':
+                elif key == 'SEPAY_TOKEN' and not SEPAY_TOKEN:
                     SEPAY_TOKEN = value
-                elif key == 'RENDER_URL':
+                elif key == 'RENDER_URL' and not RENDER_URL:
                     RENDER_URL = value
+
+# === CÁCH 4: Đọc từ file .env với encoding khác (nếu chưa có) ===
+if not BOT_TOKEN and os.path.exists('.env'):
+    print("📁 Cách 4: Thử đọc với encoding khác...")
+    try:
+        with open('.env', 'r', encoding='latin-1') as f:
+            for line in f:
+                line = line.strip()
+                if 'BOT_TOKEN' in line and not BOT_TOKEN:
+                    parts = line.split('=')
+                    if len(parts) > 1:
+                        BOT_TOKEN = parts[1].strip()
+                        print(f"   ✅ Tìm thấy BOT_TOKEN: {BOT_TOKEN[:10]}...")
+    except:
+        pass
+
+# === CÁCH 5: Đọc từ biến môi trường của Docker/Render (nếu chưa có) ===
+if not BOT_TOKEN:
+    try:
+        if os.path.exists('/etc/secrets/BOT_TOKEN'):
+            with open('/etc/secrets/BOT_TOKEN', 'r') as f:
+                BOT_TOKEN = f.read().strip()
+                print("✅ Cách 5: Tìm thấy BOT_TOKEN từ secrets")
+    except:
+        pass
 
 # Kiểm tra các biến quan trọng
 if not BOT_TOKEN:
-    print("❌ KHÔNG TÌM THẤY BOT_TOKEN")
+    print("❌ KHÔNG TÌM THẤY BOT_TOKEN (ĐÃ THỬ 5 CÁCH)")
+    print("📋 Các biến môi trường hiện có:")
+    for key in os.environ.keys():
+        print(f"   - {key}")
     sys.exit(1)
+
 if not API_KEY:
     print("❌ KHÔNG TÌM THẤY API_KEY")
     sys.exit(1)
@@ -81,6 +134,9 @@ if not BASE_URL:
     sys.exit(1)
 
 print("✅ Đã đọc tất cả biến môi trường thành công!")
+print(f"✅ BOT_TOKEN: {BOT_TOKEN[:10]}...")
+print(f"✅ API_KEY: {API_KEY[:10]}...")
+print(f"✅ BASE_URL: {BASE_URL}")
 
 # Múi giờ Việt Nam (UTC+7)
 VN_TZ = timezone(timedelta(hours=7))
@@ -702,4 +758,3 @@ if __name__ == '__main__':
             time.sleep(60)
     except KeyboardInterrupt:
         logger.info("👋 Đã dừng Flask server")
-# AUTO DEPLOY 20260309-185241 - fresh start
