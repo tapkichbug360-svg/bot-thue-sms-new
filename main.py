@@ -13,6 +13,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from telegram import Bot
 from sqlalchemy import or_
+from dotenv import load_dotenv
 
 # Telegram imports
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler
@@ -30,6 +31,27 @@ from handlers.deposit import deposit_command, deposit_amount_callback, deposit_c
 from handlers.callback import menu_callback
 # Đầu file, thêm imports
 from datetime import datetime, timedelta, timezone
+# Load từ file .env (nếu có)
+load_dotenv()
+
+# Đọc biến môi trường, nếu không có thì báo lỗi
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+API_KEY = os.getenv('API_KEY')
+BASE_URL = os.getenv('BASE_URL')
+
+if not BOT_TOKEN:
+    print("❌ KHÔNG TÌM THẤY BOT_TOKEN trong biến môi trường hoặc file .env")
+    exit(1)
+if not API_KEY:
+    print("❌ KHÔNG TÌM THẤY API_KEY")
+    exit(1)
+if not BASE_URL:
+    print("❌ KHÔNG TÌM THẤY BASE_URL")
+    exit(1)
+
+print(f"✅ BOT_TOKEN: {BOT_TOKEN[:10]}...")
+print(f"✅ API_KEY: {API_KEY[:10]}...")
+print(f"✅ BASE_URL: {BASE_URL}")
 
 # Thêm sau imports
 VN_TZ = timezone(timedelta(hours=7))
