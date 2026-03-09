@@ -11,6 +11,7 @@ from flask import Flask
 from database.models import db, User, Transaction, DepositTransaction, PushedTransaction
 # Đầu file, thêm imports
 from datetime import datetime, timedelta, timezone
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # Thêm sau imports
 VN_TZ = timezone(timedelta(hours=7))
@@ -58,6 +59,7 @@ if os.path.exists('.env'):
                 elif key == 'RENDER_URL':
                     RENDER_URL = value
                     print(f"   ✅ RENDER_URL: {value}")
+print(f"🔍 BOT DÙNG DATABASE: {os.path.abspath('database/bot.db')}")
 
 # Kiểm tra các biến quan trọng
 if not BOT_TOKEN:

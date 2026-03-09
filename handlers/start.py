@@ -507,4 +507,4 @@ async def cancel_command(update: Update, context: Context):
     )
 
 # Import app từ bot - để cuối file tránh circular import
-from bot import app
+from bot import app 
