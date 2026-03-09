@@ -18,16 +18,19 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 telegram_bot = Bot(token=BOT_TOKEN) if BOT_TOKEN else None
 
 async def send_telegram_notification(chat_id, message):
-    try:
-        if telegram_bot:
-            await telegram_bot.send_message(
-                chat_id=chat_id,
-                text=message,
-                parse_mode='Markdown'
-            )
-            logger.info(f"✅ Đã gửi thông báo Telegram cho user {chat_id}")
-    except Exception as e:
-        logger.error(f"❌ Lỗi gửi Telegram: {e}")
+    # TẠM THỜI TẮT TRÊN RENDER - ĐỂ LOCAL XỬ LÝ
+    logger.info(f"⏭️ BỎ QUA GỬI TELEGRAM TRÊN RENDER CHO USER {chat_id}")
+    return
+    # try:
+    #     if telegram_bot:
+    #         await telegram_bot.send_message(
+    #             chat_id=chat_id,
+    #             text=message,
+    #             parse_mode='Markdown'
+    #         )
+    #         logger.info(f"✅ Đã gửi thông báo Telegram cho user {chat_id}")
+    # except Exception as e:
+    #     logger.error(f"❌ Lỗi gửi Telegram: {e}")
 
 def setup_sepay_webhook(app):
     @app.route('/webhook/sepay', methods=['POST'])
@@ -129,25 +132,28 @@ def setup_sepay_webhook(app):
                 old_balance = target_user.balance
                 target_user.balance += amount
                 target_user.last_active = current_time
-                
+
                 db.session.commit()
-                
+
                 logger.info(f"✅ CẬP NHẬT THÀNH CÔNG!")
                 logger.info(f"👤 User: {target_user.user_id}")
                 logger.info(f"💰 {old_balance}đ → {target_user.balance}đ (+{amount}đ)")
-                
-                # Gửi Telegram
-                if BOT_TOKEN:
-                    message = (
-                        f"💰 **NẠP TIỀN THÀNH CÔNG!**\n\n"
-                        f"• **Số tiền:** `{amount:,}đ`\n"
-                        f"• **Mã GD:** `{transaction_code}`\n"
-                        f"• **Số dư cũ:** `{old_balance:,}đ`\n"
-                        f"• **Số dư mới:** `{target_user.balance:,}đ`\n"
-                        f"• **Thời gian:** `{current_time.strftime('%H:%M:%S %d/%m/%Y')}`"
-                    )
-                    asyncio.run(send_telegram_notification(target_user.user_id, message))
-                
+
+                # === TẮT GỬI TELEGRAM TRÊN RENDER ===
+                logger.info(f"📌 Giao dịch {transaction_code} sẽ được local gửi thông báo sau khi đồng bộ")
+
+                # Gửi Telegram - TẠM THỜI TẮT
+                # if BOT_TOKEN:
+                #     message = (
+                #         f"💰 **NẠP TIỀN THÀNH CÔNG!**\n\n"
+                #         f"• **Số tiền:** `{amount:,}đ`\n"
+                #         f"• **Mã GD:** `{transaction_code}`\n"
+                #         f"• **Số dư cũ:** `{old_balance:,}đ`\n"
+                #         f"• **Số dư mới:** `{target_user.balance:,}đ`\n"
+                #         f"• **Thời gian:** `{current_time.strftime('%H:%M:%S %d/%m/%Y')}`"
+                #     )
+                #     asyncio.run(send_telegram_notification(target_user.user_id, message))
+
                 return jsonify({
                     "success": True,
                     "data": {
