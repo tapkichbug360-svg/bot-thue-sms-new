@@ -31,12 +31,14 @@ from handlers.deposit import deposit_command, deposit_amount_callback, deposit_c
 from handlers.callback import menu_callback
 
 # Load từ file .env (nếu có) - CÁCH CHUẨN DUY NHẤT
-load_dotenv()
+if os.path.exists(".env"):
+    load_dotenv()
 
 # Đọc biến môi trường, nếu không có thì báo lỗi
-BOT_TOKEN = os.getenv('BOT_TOKEN')
-API_KEY = os.getenv('API_KEY')
-BASE_URL = os.getenv('BASE_URL')
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+API_KEY = os.environ.get("API_KEY")
+BASE_URL = os.environ.get("BASE_URL")
+print("DEBUG BOT_TOKEN:", os.environ.get("BOT_TOKEN"))
 
 if not BOT_TOKEN:
     print("❌ KHÔNG TÌM THẤY BOT_TOKEN trong biến môi trường hoặc file .env")
@@ -648,7 +650,7 @@ logger.info("="*60)
 if __name__ == '__main__':
     import threading
     
-    port = int(os.getenv('PORT', 8080))
+    port = int(os.environ.get("PORT", 8080))
     
     flask_thread = threading.Thread(
         target=lambda: app.run(
