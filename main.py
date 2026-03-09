@@ -40,19 +40,19 @@ BASE_URL = os.getenv('BASE_URL')
 
 if not BOT_TOKEN:
     print("❌ KHÔNG TÌM THẤY BOT_TOKEN trong biến môi trường hoặc file .env")
-    exit(1)
+    sys.exit(1)
 if not API_KEY:
     print("❌ KHÔNG TÌM THẤY API_KEY")
-    exit(1)
+    sys.exit(1)
 if not BASE_URL:
     print("❌ KHÔNG TÌM THẤY BASE_URL")
-    exit(1)
+    sys.exit(1)
 
 print(f"✅ BOT_TOKEN: {BOT_TOKEN[:10]}...")
 print(f"✅ API_KEY: {API_KEY[:10]}...")
 print(f"✅ BASE_URL: {BASE_URL}")
 
-# Thêm sau imports
+# Múi giờ Việt Nam (UTC+7)
 VN_TZ = timezone(timedelta(hours=7))
 
 def get_vn_time():
@@ -98,7 +98,7 @@ def home():
     return "Bot đang chạy! MBBank: 666666291005 - NGUYEN THE LAM"
 
 # ===== BIẾN TOÀN CỤC =====
-last_check_time = datetime.now() - timedelta(minutes=1)
+last_check_time = get_vn_time() - timedelta(minutes=1)
 processed_transactions = set()
 user_cache = {}
 
@@ -109,7 +109,7 @@ def check_expired_rentals():
         try:
             expired_rentals = Rental.query.filter(
                 Rental.status == 'waiting',
-                Rental.expires_at < datetime.now()
+                Rental.expires_at < get_vn_time()
             ).all()
 
             for rental in expired_rentals:
@@ -119,14 +119,14 @@ def check_expired_rentals():
                     old_balance = user.balance
                     user.balance += refund
                     rental.status = 'expired'
-                    rental.updated_at = datetime.now()
+                    rental.updated_at = get_vn_time()
                     db.session.commit()
 
                     logger.info(f"💰 TỰ ĐỘNG HOÀN {refund}đ CHO USER {user.user_id}")
                     
-                    if os.getenv('BOT_TOKEN'):
+                    if BOT_TOKEN:
                         try:
-                            bot = Bot(token=os.getenv('BOT_TOKEN'))
+                            bot = Bot(token=BOT_TOKEN)
                             message = (
                                 f"⏰ **SỐ HẾT HẠN & HOÀN TIỀN**\n\n"
                                 f"• **Số:** `{rental.phone_number}`\n"
@@ -148,8 +148,8 @@ def get_or_create_user(user_id, username=None):
             user_id=user_id,
             username=username or f"user_{user_id}",
             balance=0,
-            created_at=datetime.now(),
-            last_active=datetime.now()
+            created_at=get_vn_time(),
+            last_active=get_vn_time()
         )
         db.session.add(user)
         db.session.flush()
@@ -206,7 +206,7 @@ def api_sync_pending():
                         status='pending',
                         transaction_code=t['code'],
                         description=f"Auto-synced: {t['code']}",
-                        created_at=datetime.now()
+                        created_at=get_vn_time()
                     )
                     db.session.add(new_trans)
                     synced += 1
@@ -330,7 +330,7 @@ def api_update_user():
             user = get_or_create_user(user_id)
             if username:
                 user.username = username
-                user.last_active = datetime.now()
+                user.last_active = get_vn_time()
                 db.session.commit()
                 logger.info(f"📝 Đã cập nhật username cho user {user_id}: {username}")
             
@@ -365,7 +365,7 @@ def api_stats():
                     "pending_transactions": pending_transactions,
                     "success_transactions": success_transactions,
                     "total_deposits": total_deposits,
-                    "timestamp": datetime.now().isoformat()
+                    "timestamp": get_vn_time().isoformat()
                 }
             }), 200
     except Exception as e:
@@ -392,13 +392,13 @@ def api_process_transaction():
                     status='success',
                     transaction_code=code,
                     description=f"Force processed: {code}",
-                    created_at=datetime.now(),
-                    updated_at=datetime.now()
+                    created_at=get_vn_time(),
+                    updated_at=get_vn_time()
                 )
                 db.session.add(transaction)
             else:
                 transaction.status = 'success'
-                transaction.updated_at = datetime.now()
+                transaction.updated_at = get_vn_time()
             
             old_balance = user.balance
             user.balance += amount
@@ -457,7 +457,7 @@ def api_sync_bidirectional():
                         status='pending',
                         transaction_code=lt['code'],
                         description=f"Bidirectional sync: {lt['code']}",
-                        created_at=datetime.now()
+                        created_at=get_vn_time()
                     )
                     db.session.add(new_trans)
                     synced_from_local += 1
@@ -547,7 +547,7 @@ def api_auto_sync():
                 "success": True,
                 "count": len(result),
                 "transactions": result,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": get_vn_time().isoformat()
             }), 200
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
@@ -571,9 +571,9 @@ def auto_check_new_transactions():
                         continue
                         
                     user = User.query.get(trans.user_id)
-                    if user and os.getenv('BOT_TOKEN'):
+                    if user and BOT_TOKEN:
                         try:
-                            bot = Bot(token=os.getenv('BOT_TOKEN'))
+                            bot = Bot(token=BOT_TOKEN)
                             message = (
                                 f"💰 **NẠP TIỀN THÀNH CÔNG!**\n\n"
                                 f"• **Số tiền:** `{trans.amount:,}đ`\n"
@@ -590,16 +590,16 @@ def auto_check_new_transactions():
                 if len(processed_transactions) > 1000:
                     processed_transactions = set(list(processed_transactions)[-500:])
             
-            last_check_time = datetime.now()
+            last_check_time = get_vn_time()
             
         except Exception as e:
             logger.error(f"Lỗi auto check: {e}")
 
 async def send_telegram_message(chat_id, message):
-    if not os.getenv('BOT_TOKEN'):
+    if not BOT_TOKEN:
         return
     try:
-        bot = Bot(token=os.getenv('BOT_TOKEN'))
+        bot = Bot(token=BOT_TOKEN)
         await bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
     except Exception as e:
         logger.error(f"Lỗi gửi Telegram: {e}")
