@@ -378,6 +378,9 @@ def setup_sepay_webhook(app):
                 
                 if not transaction:
                     # Tạo giao dịch mới
+                    logger.info(f"🆕 TẠO GIAO DỊCH MỚI CHO USER {target_user.user_id}")
+                    logger.info(f"💰 BALANCE TRƯỚC KHI CỘNG: {target_user.balance}")
+                    
                     transaction = Transaction(
                         user_id=target_user.id,
                         amount=amount,
@@ -389,26 +392,39 @@ def setup_sepay_webhook(app):
                         updated_at=current_time
                     )
                     db.session.add(transaction)
-                    # CỘNG TIỀN CHO USER (giao dịch mới)
+                    
+                    # CỘNG TIỀN CHO USER
                     target_user.balance += amount
-                    logger.info(f"✅ TẠO GIAO DỊCH MỚI CHO USER {target_user.user_id}: {transaction_code}")
+                    logger.info(f"💰 ĐÃ CỘNG {amount} VÀO BALANCE: {old_balance} → {target_user.balance}")
+                    
                 else:
                     # Giao dịch đã tồn tại - CỘNG THÊM TIỀN
                     logger.info(f"🔄 Giao dịch {transaction_code} đã tồn tại, cộng thêm {amount}đ cho user {target_user.user_id}")
+                    logger.info(f"💰 BALANCE TRƯỚC KHI CỘNG: {target_user.balance}")
+                    
+                    # Cập nhật transaction
                     transaction.amount += amount
                     transaction.status = 'success'
                     transaction.updated_at = current_time
-                    # ===== QUAN TRỌNG: CỘNG TIỀN CHO USER =====
-                    target_user.balance += amount  # <<< DÒNG NÀY ĐÃ ĐƯỢC THÊM VÀO
+                    
+                    # CỘNG TIỀN CHO USER
+                    target_user.balance += amount
+                    logger.info(f"💰 ĐÃ CỘNG {amount} VÀO BALANCE: {old_balance} → {target_user.balance}")
                 
                 # Cập nhật thời gian hoạt động
                 target_user.last_active = current_time
 
                 # COMMIT VÀO DATABASE
-                db.session.commit()
+                try:
+                    db.session.commit()
+                    logger.info(f"✅ COMMIT THÀNH CÔNG! Balance mới: {target_user.balance}")
+                except Exception as e:
+                    logger.error(f"❌ COMMIT THẤT BẠI: {e}")
+                    db.session.rollback()
+                    return jsonify({"success": False, "error": "Commit failed"}), 500
 
-                logger.info(f"✅ CẬP NHẬT THÀNH CÔNG CHO USER {target_user.user_id}!")
                 logger.info(f"💰 {old_balance}đ → {target_user.balance}đ (+{amount}đ)")
+                logger.info(f"✅ CẬP NHẬT THÀNH CÔNG CHO USER {target_user.user_id}!")
                 
                 # ===== GỬI TELEGRAM NGAY LẬP TỨC =====
                 try:
