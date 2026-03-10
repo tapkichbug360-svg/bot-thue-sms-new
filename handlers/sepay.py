@@ -383,14 +383,19 @@ def setup_sepay_webhook(app):
                 logger.info(f"👤 USER: {target_user.user_id}, Username: {target_user.username}")
                 logger.info(f"💰 BALANCE HIỆN TẠI TRONG DB: {target_user.balance}")
                 
-                # ===== XỬ LÝ GIAO DỊCH =====
+                # ===== XỬ LÝ GIAO DỊCH - CÁCH ĐƠN GIẢN NHẤT =====
                 old_balance = target_user.balance
-                
+
+                # LUÔN CỘNG TIỀN - KHÔNG BAO GIỜ BỎ QUA
+                target_user.balance += amount
+                logger.info(f"💰 ĐÃ CỘNG {amount} VÀO BALANCE: {old_balance} → {target_user.balance}")
+                # ===== THÊM DÒNG NÀY ĐỂ KIỂM TRA =====
+                print(f"🔴🔴🔴 KIỂM TRA: ĐÃ CỘNG {amount}, BALANCE={target_user.balance}")  # In ra console
+                logger.critical(f"🔴🔴🔴 KIỂM TRA: ĐÃ CỘNG {amount}, BALANCE={target_user.balance}")  # Log level cao nhất
+
+                # XỬ LÝ TRANSACTION (CHỈ ĐỂ LƯU LỊCH SỬ)
                 if not transaction:
-                    # Tạo giao dịch mới
-                    logger.info(f"🆕 TẠO GIAO DỊCH MỚI CHO USER {target_user.user_id}")
-                    logger.info(f"💰 BALANCE TRƯỚC KHI CỘNG: {target_user.balance}")
-                    
+                    # Tạo mới
                     transaction = Transaction(
                         user_id=target_user.id,
                         amount=amount,
@@ -402,51 +407,24 @@ def setup_sepay_webhook(app):
                         updated_at=current_time
                     )
                     db.session.add(transaction)
-                    
-                    # CỘNG TIỀN CHO USER
-                    target_user.balance += amount
-                    logger.info(f"💰 ĐÃ CỘNG {amount} VÀO BALANCE: {old_balance} → {target_user.balance}")
-                    
+                    logger.info(f"✅ TẠO TRANSACTION MỚI: {transaction_code}")
                 else:
-                    # Giao dịch đã tồn tại - CỘNG THÊM TIỀN
-                    logger.info(f"🔄 Giao dịch {transaction_code} đã tồn tại, cộng thêm {amount}đ cho user {target_user.user_id}")
-                    logger.info(f"💰 BALANCE TRƯỚC KHI CỘNG (từ DB): {target_user.balance}")
-                    logger.info(f"💰 TRANSACTION CŨ có amount={transaction.amount}")
-                    
-                    # Cập nhật transaction
-                    old_trans_amount = transaction.amount
+                    # Cập nhật transaction cũ (chỉ để thống kê)
                     transaction.amount += amount
-                    transaction.status = 'success'
                     transaction.updated_at = current_time
-                    
-                    logger.info(f"📝 TRANSACTION amount cũ: {old_trans_amount} → mới: {transaction.amount}")
-                    
-                    # CỘNG TIỀN CHO USER
-                    target_user.balance += amount
-                    logger.info(f"💰 ĐÃ CỘNG {amount} VÀO BALANCE: {old_balance} → {target_user.balance}")
-                
-                # Cập nhật thời gian hoạt động
+                    logger.info(f"🔄 CẬP NHẬT TRANSACTION CŨ: {transaction.amount}")
+
+                # Cập nhật thời gian
                 target_user.last_active = current_time
 
-                # COMMIT VÀO DATABASE
+                # COMMIT
                 try:
                     db.session.commit()
-                    logger.info(f"✅ COMMIT THÀNH CÔNG! Balance trong DB sau commit: {target_user.balance}")
-                    
-                    # KIỂM TRA LẠI TỪ DB
-                    db.session.refresh(target_user)
-                    logger.info(f"🔍 KIỂM TRA LẠI TỪ DB SAU REFRESH: {target_user.balance}")
-                    
-                    # KIỂM TRA TRANSACTION
-                    trans_check = Transaction.query.get(transaction.id)
-                    logger.info(f"🔍 TRANSACTION TRONG DB: amount={trans_check.amount}")
-                    
+                    logger.info(f"✅ COMMIT THÀNH CÔNG! Balance: {target_user.balance}")
                 except Exception as e:
-                    logger.error(f"❌ COMMIT THẤT BẠI: {e}")
-                    import traceback
-                    traceback.print_exc()
+                    logger.error(f"❌ COMMIT LỖI: {e}")
                     db.session.rollback()
-                    return jsonify({"success": False, "error": "Commit failed"}), 500
+                    return jsonify({"success": False}), 500
 
                 logger.info(f"💰 {old_balance}đ → {target_user.balance}đ (+{amount}đ)")
                 logger.info(f"✅ CẬP NHẬT THÀNH CÔNG CHO USER {target_user.user_id}!")
