@@ -21,23 +21,13 @@ async def send_telegram_notification(chat_id, message):
     # TẠM THỜI TẮT TRÊN RENDER - ĐỂ LOCAL XỬ LÝ
     logger.info(f"⏭️ BỎ QUA GỬI TELEGRAM TRÊN RENDER CHO USER {chat_id}")
     return
-    # try:
-    #     if telegram_bot:
-    #         await telegram_bot.send_message(
-    #             chat_id=chat_id,
-    #             text=message,
-    #             parse_mode='Markdown'
-    #         )
-    #         logger.info(f"✅ Đã gửi thông báo Telegram cho user {chat_id}")
-    # except Exception as e:
-    #     logger.error(f"❌ Lỗi gửi Telegram: {e}")
 
 def setup_sepay_webhook(app):
     @app.route('/webhook/sepay', methods=['POST'])
     def sepay_webhook():
         try:
             data = request.json
-            current_time = datetime.now()  # Định nghĩa ngay từ đầu
+            current_time = datetime.now()
             logger.info("="*60)
             logger.info("📩 NHẬN WEBHOOK TỪ SEPAY")
             logger.info(f"Dữ liệu: {data}")
@@ -77,36 +67,54 @@ def setup_sepay_webhook(app):
                     transaction_code=transaction_code
                 ).first()
                 
-                # Xác định user
+                # ===== XÁC ĐỊNH USER - CHỈ DÙNG USER CÓ SẴN =====
                 target_user = None
                 
-                if transaction:
-                    target_user = User.query.get(transaction.user_id)
+                # CÁCH 1: Tìm user_id trong nội dung (ƯU TIÊN NHẤT)
+                user_match = re.search(r'tu[_\s]*(\d+)', content, re.IGNORECASE)
+                if user_match:
+                    found_user_id = int(user_match.group(1))
+                    target_user = User.query.filter_by(user_id=found_user_id).first()
                     if target_user:
-                        logger.info(f"✅ Tìm thấy user từ giao dịch: {target_user.user_id}")
+                        logger.info(f"✅ Cách 1: Tìm thấy user từ nội dung: {target_user.user_id}")
                 
+                # CÁCH 2: Tìm user_id dạng UID
                 if not target_user:
-                    user_match = re.search(r'tu[_\s]*(\d+)', content, re.IGNORECASE)
-                    if user_match:
-                        found_user_id = int(user_match.group(1))
+                    uid_match = re.search(r'UID(\d+)', content, re.IGNORECASE)
+                    if uid_match:
+                        found_user_id = int(uid_match.group(1))
                         target_user = User.query.filter_by(user_id=found_user_id).first()
                         if target_user:
-                            logger.info(f"✅ Tìm thấy user từ nội dung: {target_user.user_id}")
+                            logger.info(f"✅ Cách 2: Tìm thấy user từ UID: {target_user.user_id}")
                 
+                # CÁCH 3: Tìm user_id dạng ID
                 if not target_user:
-                    hash_obj = hashlib.md5(transaction_code.encode())
-                    new_user_id = int(hash_obj.hexdigest()[:8], 16) % 1000000000
-                    
-                    target_user = User(
-                        user_id=new_user_id,
-                        username=f"user_{transaction_code[:4]}",
-                        balance=0,
-                        created_at=current_time,
-                        last_active=current_time
-                    )
-                    db.session.add(target_user)
-                    db.session.flush()
-                    logger.info(f"🆕 TẠO USER MỚI: {target_user.user_id}")
+                    id_match = re.search(r'ID(\d+)', content, re.IGNORECASE)
+                    if id_match:
+                        found_user_id = int(id_match.group(1))
+                        target_user = User.query.filter_by(user_id=found_user_id).first()
+                        if target_user:
+                            logger.info(f"✅ Cách 3: Tìm thấy user từ ID: {target_user.user_id}")
+                
+                # CÁCH 4: Từ giao dịch có sẵn
+                if not target_user and transaction:
+                    target_user = User.query.get(transaction.user_id)
+                    if target_user:
+                        logger.info(f"✅ Cách 4: Tìm thấy user từ giao dịch: {target_user.user_id}")
+                
+                # CÁCH 5: Tìm user gần đây nhất
+                if not target_user:
+                    target_user = User.query.order_by(User.last_active.desc()).first()
+                    if target_user:
+                        logger.info(f"✅ Cách 5: Tìm thấy user gần đây: {target_user.user_id}")
+                
+                # NẾU KHÔNG TÌM THẤY USER -> TỪ CHỐI GIAO DỊCH
+                if not target_user:
+                    logger.error(f"❌ KHÔNG TÌM THẤY USER CHO GIAO DỊCH {transaction_code}")
+                    return jsonify({
+                        "success": False,
+                        "error": "User not found"
+                    }), 404
                 
                 # Xử lý giao dịch
                 if not transaction:
@@ -138,21 +146,7 @@ def setup_sepay_webhook(app):
                 logger.info(f"✅ CẬP NHẬT THÀNH CÔNG!")
                 logger.info(f"👤 User: {target_user.user_id}")
                 logger.info(f"💰 {old_balance}đ → {target_user.balance}đ (+{amount}đ)")
-
-                # === TẮT GỬI TELEGRAM TRÊN RENDER ===
                 logger.info(f"📌 Giao dịch {transaction_code} sẽ được local gửi thông báo sau khi đồng bộ")
-
-                # Gửi Telegram - TẠM THỜI TẮT
-                # if BOT_TOKEN:
-                #     message = (
-                #         f"💰 **NẠP TIỀN THÀNH CÔNG!**\n\n"
-                #         f"• **Số tiền:** `{amount:,}đ`\n"
-                #         f"• **Mã GD:** `{transaction_code}`\n"
-                #         f"• **Số dư cũ:** `{old_balance:,}đ`\n"
-                #         f"• **Số dư mới:** `{target_user.balance:,}đ`\n"
-                #         f"• **Thời gian:** `{current_time.strftime('%H:%M:%S %d/%m/%Y')}`"
-                #     )
-                #     asyncio.run(send_telegram_notification(target_user.user_id, message))
 
                 return jsonify({
                     "success": True,
