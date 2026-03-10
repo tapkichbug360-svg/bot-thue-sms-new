@@ -280,13 +280,6 @@ def api_sync_pending():
                     else:
                         logger.info(f"✅ Mã {code} đã được đồng bộ ở thời gian khác, vẫn cho phép")
                 
-                # === KIỂM TRA THỜI GIAN QUÁ CŨ ===
-                time_now = datetime.now()
-                if (time_now - trans_time).total_seconds() > 3600:  # Quá 60 phút
-                    logger.warning(f"⏰ Giao dịch {code} quá cũ ({(time_now - trans_time).total_seconds()/60:.1f} phút)")
-                    rejected += 1
-                    continue
-                
                 # === TÌM HOẶC TẠO USER ===
                 user = get_or_create_user(user_id, username)
                 
