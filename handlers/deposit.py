@@ -179,7 +179,7 @@ async def deposit_amount_callback(update: Update, context: Context):
         )
         
         # Tạo QR code
-        content = f"NAP {transaction_code}"
+        content = f"NAP {transaction_code} tu {user.id}"
         encoded_content = urllib.parse.quote(content)
         qr_url = f"https://img.vietqr.io/image/{MB_BIN}-{MB_ACCOUNT}-compact2.jpg?amount={amount}&addInfo={encoded_content}&accountName={MB_NAME}"
         
@@ -200,7 +200,7 @@ async def deposit_amount_callback(update: Update, context: Context):
 👤 **Chủ TK:** {MB_NAME}
 💰 **Số tiền:** {amount:,}đ
 📝 **Nội dung:** `{content}`
-
+🆔 **User ID của bạn:** `{user.id}`
 👇 **Bấm nút 'TÔI ĐÃ CHUYỂN KHOẢN' sau khi chuyển!""",
             parse_mode='Markdown',
             reply_markup=reply_markup

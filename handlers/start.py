@@ -20,16 +20,16 @@ logger = logging.getLogger(__name__)
 
 MB_ACCOUNT = os.getenv('MB_ACCOUNT', '666666291005')
 MB_NAME = os.getenv('MB_NAME', 'NGUYEN THE LAM')
-RENDER_URL = os.getenv('RENDER_URL', 'https://bot-thue-sms-v2.onrender.com')
+RENDER_URL = os.getenv('RENDER_URL', 'https://bot-thue-sms-new.onrender.com')
 
 async def sync_balance_with_render(user_id):
     """Đồng bộ số dư với Render - CHỈ LẤY SỐ CAO HƠN"""
     try:
         # Gọi API lấy số dư từ Render
         response = requests.post(
-            f"{RENDER_URL}/api/get-user-balance",
+            f"{RENDER_URL}/api/check-user",
             json={'user_id': user_id},
-            timeout=10
+            timeout=5
         )
         
         if response.status_code == 200:
@@ -46,18 +46,6 @@ async def sync_balance_with_render(user_id):
                         if render_balance > user.balance:
                             logger.info(f"💰 Render cao hơn: {render_balance}đ > {user.balance}đ -> Cập nhật")
                             user.balance = render_balance
-                            
-                            # Cập nhật các giao dịch
-                            if 'transactions' in data:
-                                from database.models import DepositTransaction
-                                for trans_data in data['transactions']:
-                                    transaction = DepositTransaction.query.filter_by(
-                                        transaction_id=trans_data['code']
-                                    ).first()
-                                    if transaction and transaction.status != 'completed':
-                                        transaction.status = trans_data['status']
-                                        transaction.processed_at = datetime.now()
-                            
                             db.session.commit()
                             logger.info(f"✅ Đồng bộ user {user_id}: {old_balance}đ → {render_balance}đ")
                             return True
@@ -98,7 +86,7 @@ async def push_user_balance_to_render(user_id, balance, username):
                 'balance': balance,
                 'username': username
             },
-            timeout=10
+            timeout=5
         )
         
         if response.status_code == 200:
@@ -120,7 +108,7 @@ async def push_user_to_render(user_id, username):
         response = requests.post(
             f"{RENDER_URL}/api/check-user",
             json={'user_id': user_id, 'username': username},
-            timeout=10
+            timeout=5
         )
         if response.status_code == 200:
             logger.info(f"✅ Đã push user {user_id} lên Render thành công")
@@ -336,7 +324,7 @@ async def check_command(update: Update, context: Context):
             response = requests.post(
                 f"{RENDER_URL}/api/check-transaction",
                 json={'code': code},
-                timeout=10
+                timeout=5
             )
             
             if response.status_code == 200:
@@ -507,4 +495,4 @@ async def cancel_command(update: Update, context: Context):
     )
 
 # Import app từ bot - để cuối file tránh circular import
-from bot import app 
+from bot import app

@@ -13,12 +13,43 @@ def get_vn_time():
     """Lấy thời gian Việt Nam hiện tại"""
     return datetime.now(VN_TZ).replace(tzinfo=None)
 
-RENDER_URL = "https://bot-thue-sms-v2.onrender.com"
+RENDER_URL = "https://bot-thue-sms-new.onrender.com"
 
 class UserSyncDaemon:
     def __init__(self):
         self.running = True
         self.last_sync = {}
+    def send_telegram_notification(self, user_id, new_balance, amount):
+        """Gửi thông báo Telegram khi có biến động số dư"""
+        try:
+            import requests
+            from datetime import datetime
+            
+            BOT_TOKEN = os.getenv('BOT_TOKEN', '8561464326:AAG6NPFNvvFV0vFWQP1t8qUMo3WrjW5Un90')
+            current_time = datetime.now().strftime('%H:%M:%S %d/%m/%Y')
+            
+            message = (
+                f"💰 **NẠP TIỀN THÀNH CÔNG!**\n\n"
+                f"• **Số tiền:** {amount:,}đ\n"
+                f"• **Số dư mới:** {new_balance:,}đ\n"
+                f"• **Thời gian:** {current_time}"
+            )
+            
+            url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+            payload = {
+                'chat_id': user_id,
+                'text': message,
+                'parse_mode': 'Markdown'
+            }
+            
+            response = requests.post(url, json=payload, timeout=5)
+            if response.status_code == 200:
+                print(f"     📨 Đã gửi thông báo Telegram cho user {user_id}")
+            else:
+                print(f"     ⚠️ Lỗi gửi Telegram: {response.status_code}")
+                
+        except Exception as e:
+            print(f"     ⚠️ Lỗi gửi Telegram: {e}")
     
     def get_all_local_users(self):
         """Lấy tất cả user từ database local"""
@@ -91,14 +122,45 @@ class UserSyncDaemon:
             return False
     
     def push_transaction_to_render(self, transaction):
-        """Đẩy transaction lên Render"""
+        """Đẩy transaction lên Render - CÓ THÊM THỜI GIAN ĐỂ PHÂN BIỆT"""
         try:
+            # Tạo payload với thời gian hiện tại
+            payload = {
+                'transactions': [{
+                    'code': transaction['code'],
+                    'amount': transaction['amount'],
+                    'user_id': transaction['user_id'],
+                    'username': transaction['username'],
+                    'created_at': datetime.now().isoformat()  # THÊM THỜI GIAN
+                }]
+            }
+            
+            # Log để debug
+            print(f"  📤 Push transaction {transaction['code']} lên Render (thời gian: {datetime.now().strftime('%H:%M:%S')})")
+            
             response = requests.post(
                 f"{RENDER_URL}/api/sync-pending",
-                json={'transactions': [transaction]},
+                json=payload,
                 timeout=5
             )
-            return response.status_code == 200
+            
+            if response.status_code == 200:
+                result = response.json()
+                print(f"  ✅ Push transaction {transaction['code']} thành công")
+                print(f"     Synced: {result.get('synced', 0)}, Rejected: {result.get('rejected', 0)}")
+                return True
+            else:
+                print(f"  ⚠️ Push transaction {transaction['code']} thất bại: {response.status_code}")
+                try:
+                    error_detail = response.json()
+                    print(f"     Chi tiết: {error_detail}")
+                except:
+                    pass
+                return False
+                
+        except requests.exceptions.Timeout:
+            print(f"  ⏰ Timeout push transaction {transaction['code']}")
+            return False
         except Exception as e:
             print(f"  ❌ Lỗi push transaction {transaction['code']}: {e}")
             return False
@@ -230,7 +292,7 @@ class UserSyncDaemon:
             print(f"  ❌ Lỗi lưu failed push: {e}")
     
     def pull_user_from_render(self, user_id):
-        """Kéo user từ Render về - LẤY SỐ DƯ THEO THỜI GIAN THỰC"""
+        """Kéo user từ Render về - GIỮ NGUYÊN LOGIC, THÊM FORCE UPDATE BALANCE VÀ GỬI TELEGRAM"""
         try:
             # Gọi API lấy thông tin user từ Render (có thời gian)
             response = requests.post(
@@ -291,6 +353,11 @@ class UserSyncDaemon:
                     print(f"  💾 User {user_id}: Cập nhật từ Render (mới hơn)")
                     print(f"     Local: {local_balance}đ ({local_time.strftime('%H:%M:%S')})")
                     print(f"     Render: {render_balance}đ ({render_time.strftime('%H:%M:%S')}) → ĐÃ CẬP NHẬT")
+                    
+                    # Gửi thông báo nếu số dư thay đổi
+                    if local_balance != render_balance:
+                        self.send_telegram_notification(user_id, render_balance, render_balance - local_balance)
+                        
                     conn.commit()
                     
                 elif render_time < local_time:
@@ -313,11 +380,32 @@ class UserSyncDaemon:
                     # Cùng thời gian → Giữ nguyên, chỉ cập nhật nếu khác số
                     if local_balance != render_balance:
                         print(f"  ⚠️ User {user_id}: Số dư lệch nhưng cùng thời gian")
-                        # Ưu tiên số dư local (vì user đang tương tác)
-                        self.push_user_balance_to_render(user_id, local_balance, username)
+                        
+                        # === CHỈ CẬP NHẬT NẾU RENDER CAO HƠN LOCAL ===
+                        if render_balance > local_balance:
+                            cursor.execute('''
+                                UPDATE users 
+                                SET balance = ? 
+                                WHERE user_id = ?
+                            ''', (render_balance, user_id))
+                            
+                            # Gửi thông báo
+                            amount_diff = render_balance - local_balance
+                            self.send_telegram_notification(user_id, render_balance, amount_diff)
+                            
+                            conn.commit()
+                            print(f"     ✅ Đã cập nhật balance: {local_balance}đ → {render_balance}đ (+{amount_diff}đ)")
+                            
+                        elif render_balance < local_balance:
+                            print(f"     ⚠️ Render thấp hơn local: {render_balance}đ < {local_balance}đ")
+                            print(f"        Giữ nguyên local (không cập nhật)")
+                            
+                        else:
+                            # Trường hợp bằng nhau (không xảy ra vì đã check !=)
+                            pass
                     else:
                         print(f"  ✅ User {user_id}: Đã đồng bộ {local_balance}đ")
-                
+
                 conn.close()
                 return True
             return False
@@ -360,7 +448,7 @@ class UserSyncDaemon:
         return self.pull_user_from_render(user_id)
     
     def run_daemon(self):
-        """Chạy daemon tự động"""
+        """Chạy daemon tự động - ĐỒNG BỘ TẤT CẢ USER"""
         print("="*70)
         print("🚀 DAEMON ĐỒNG BỘ 2 CHIỀU - 10 GIÂY/LẦN")
         print("="*70)
@@ -371,14 +459,28 @@ class UserSyncDaemon:
                 counter += 1
                 print(f"\n🔄 Lần {counter} - {datetime.now().strftime('%H:%M:%S')}")
                 
-                # Đồng bộ user
-                self.sync_all_users()
+                # === LẤY DANH SÁCH USER LOCAL ===
+                local_users = self.get_all_local_users()
+                print(f"📋 Local có {len(local_users)} user")
                 
-                # Đồng bộ transaction
-                self.sync_transactions()
+                # === PUSH TẤT CẢ USER LÊN RENDER ===
+                for user in local_users:
+                    if self.push_user_to_render(user['user_id'], user['username']):
+                        print(f"  ✅ Push user {user['user_id']}")
+                    time.sleep(0.2)
                 
-                # Force sync user chính
-                self.sync_user_balance(5180190297)
+                # === PULL TẤT CẢ USER TỪ RENDER VỀ ===
+                for user in local_users:
+                    self.pull_user_from_render(user['user_id'])
+                    time.sleep(0.2)
+                
+                # === ĐỒNG BỘ TRANSACTION ===
+                local_trans = self.get_all_local_transactions()
+                print(f"📋 Có {len(local_trans)} transaction pending")
+                for trans in local_trans:
+                    if self.push_transaction_to_render(trans):
+                        print(f"  ✅ Push transaction {trans['code']}")
+                    time.sleep(0.2)
                 
                 time.sleep(10)  # 10 giây
                 

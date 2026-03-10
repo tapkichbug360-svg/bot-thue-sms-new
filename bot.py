@@ -11,7 +11,10 @@ from flask import Flask
 from database.models import db, User, Transaction, DepositTransaction, PushedTransaction
 # Đầu file, thêm imports
 from datetime import datetime, timedelta, timezone
+from telegram import Bot  # THÊM DÒNG NÀY
 logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger('apscheduler.executors.default').setLevel(logging.WARNING)
+logging.getLogger('apscheduler.scheduler').setLevel(logging.WARNING)
 
 # Thêm sau imports
 VN_TZ = timezone(timedelta(hours=7))
@@ -89,6 +92,56 @@ app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{db_path}'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db.init_app(app)
 logger.info(f"✅ Database path: {db_path}")
+
+# ===== HÀM GỬI THÔNG BÁO TELEGRAM =====
+async def send_telegram_message(chat_id, text):
+    """Gửi tin nhắn Telegram đến user"""
+    try:
+        bot = Bot(token=BOT_TOKEN)
+        await bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode='Markdown'
+        )
+        logger.info(f"✅ Đã gửi thông báo đến user {chat_id}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Lỗi gửi Telegram: {e}")
+        return False
+
+# ===== HÀM KIỂM TRA GIAO DỊCH MỚI =====
+async def check_new_transactions():
+    """Kiểm tra giao dịch mới và gửi thông báo"""
+    with app.app_context():
+        try:
+            # Lấy các giao dịch thành công trong 10 giây qua
+            time_threshold = datetime.now() - timedelta(seconds=10)
+            new_transactions = Transaction.query.filter(
+                Transaction.status == 'success',
+                Transaction.updated_at > time_threshold
+            ).all()
+            
+            for trans in new_transactions:
+                user = User.query.get(trans.user_id)
+                if user:
+                    # Kiểm tra xem đã gửi thông báo chưa
+                    if not hasattr(trans, 'notified') or not trans.notified:
+                        message = (
+                            f"💰 **NẠP TIỀN THÀNH CÔNG!**\n\n"
+                            f"• **Số tiền:** `{trans.amount:,}đ`\n"
+                            f"• **Mã GD:** `{trans.transaction_code}`\n"
+                            f"• **Số dư mới:** `{user.balance:,}đ`\n"
+                            f"• **Thời gian:** `{datetime.now().strftime('%H:%M:%S %d/%m/%Y')}`"
+                        )
+                        await send_telegram_message(user.user_id, message)
+                        
+                        # Đánh dấu đã gửi
+                        trans.notified = True
+                        db.session.commit()
+                        logger.info(f"✅ Đã gửi thông báo GD {trans.transaction_code}")
+                        
+        except Exception as e:
+            logger.error(f"❌ Lỗi kiểm tra giao dịch: {e}")
 
 # Import handlers
 try:
@@ -238,15 +291,18 @@ async def main():
         
         logger.info("✅ BOT KHỞI ĐỘNG THÀNH CÔNG!")
         
-        # Khởi động scheduler - CHỈ GIỮ CLEANUP
+        # Khởi động scheduler
         from apscheduler.schedulers.asyncio import AsyncIOScheduler
         scheduler = AsyncIOScheduler()
         
-        # CHỈ thêm job dọn dẹp
+        # Thêm job dọn dẹp
         scheduler.add_job(cleanup_old_data, 'interval', hours=1)
         
+        # Thêm job kiểm tra giao dịch mới (chạy mỗi 10 giây)
+        scheduler.add_job(check_new_transactions, 'interval', seconds=10)
+        
         scheduler.start()
-        logger.info("✅ Scheduler started (chỉ cleanup)")
+        logger.info("✅ Scheduler started (cleanup + check transactions)")
         
         # Khởi động bot
         await application.initialize()

@@ -85,6 +85,22 @@ class PushedTransaction(db.Model):
     transaction_code = db.Column(db.String(50), unique=True, index=True)
     pushed_at = db.Column(db.DateTime, default=datetime.now, index=True)
 
+# ===== THÊM BẢNG MỚI - KHÔNG ẢNH HƯỞNG CẤU TRÚC CŨ =====
+class SyncedTransaction(db.Model):
+    """Lưu các giao dịch đã được đồng bộ để tránh đồng bộ lại"""
+    __tablename__ = 'synced_transactions'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    transaction_code = db.Column(db.String(50), unique=True, nullable=False, index=True)
+    user_id = db.Column(db.BigInteger, nullable=False)
+    amount = db.Column(db.Integer, nullable=False)
+    synced_at = db.Column(db.DateTime, default=datetime.now, index=True)
+    transaction_time = db.Column(db.DateTime, nullable=True)  # Thời gian gốc của giao dịch
+    source = db.Column(db.String(20), default='sepay')  # 'sepay', 'manual', 'daemon'
+    
+    def __repr__(self):
+        return f'<SyncedTransaction {self.transaction_code}>'
+
 def init_db():
     db_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'database', 'bot.db')
     return f'sqlite:///{db_path}'

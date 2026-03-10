@@ -5,6 +5,7 @@ import atexit
 import asyncio
 import time
 import requests
+from database.models import SyncedTransaction
 from datetime import datetime, timedelta, timezone
 from flask import Flask, request, jsonify
 from database.models import db, User, Rental, Transaction
@@ -111,6 +112,11 @@ with app.app_context():
         tables = inspector.get_table_names()
         logger.info(f"📊 Các bảng trong database: {tables}")
         
+        # Kiểm tra và tạo bảng synced_transactions nếu chưa có
+        if 'synced_transactions' not in tables:
+            SyncedTransaction.__table__.create(db.engine)
+            logger.info("✅ Đã tạo bảng synced_transactions")
+            
     except Exception as e:
         logger.error(f"❌ Lỗi tạo database: {e}")
 
@@ -218,26 +224,96 @@ def api_sync_pending():
         with app.app_context():
             synced = 0
             skipped = 0
+            rejected = 0
             
             for t in transactions:
-                user = get_or_create_user(t['user_id'], t.get('username'))
+                code = t['code']
+                amount = t['amount']
+                user_id = t['user_id']
+                username = t.get('username')
+                trans_time_str = t.get('created_at')
                 
-                existing = Transaction.query.filter_by(transaction_code=t['code']).first()
-                if not existing:
-                    new_trans = Transaction(
-                        user_id=user.id,
-                        amount=t['amount'],
-                        type='deposit',
-                        status='pending',
-                        transaction_code=t['code'],
-                        description=f"Auto-synced: {t['code']}",
-                        created_at=get_vn_time()
-                    )
-                    db.session.add(new_trans)
-                    synced += 1
-                    logger.info(f"✅ Đồng bộ giao dịch {t['code']} cho user {user.user_id}")
+                # === CHUYỂN THỜI GIAN TỪ STRING ===
+                trans_time = None
+                if trans_time_str:
+                    try:
+                        trans_time = datetime.fromisoformat(trans_time_str)
+                    except:
+                        trans_time = datetime.now()
                 else:
-                    skipped += 1
+                    trans_time = datetime.now()
+                
+                # === TÌM CÁC GIAO DỊCH CÙNG MÃ ===
+                existing_trans = Transaction.query.filter_by(
+                    transaction_code=code
+                ).first()
+                
+                existing_sync = SyncedTransaction.query.filter_by(
+                    transaction_code=code
+                ).first()
+                
+                # === NẾU ĐÃ CÓ GIAO DỊCH TRONG DB ===
+                if existing_trans:
+                    # Lấy thời gian giao dịch cũ
+                    old_time = existing_trans.created_at
+                    time_diff = abs((trans_time - old_time).total_seconds())
+                    
+                    # Nếu thời gian KHÁC NHAU (trên 1 giây) -> Cho phép
+                    if time_diff > 1:  # Khác thời gian
+                        logger.info(f"✅ Mã {code} có thời gian khác ({time_diff:.0f}s), cho phép đồng bộ")
+                        # VẪN CHO PHÉP TẠO GIAO DỊCH MỚI
+                    else:
+                        # CÙNG THỜI GIAN -> Từ chối
+                        logger.warning(f"⏭️ Mã {code} đã tồn tại với cùng thời gian, từ chối")
+                        rejected += 1
+                        continue
+                
+                # === KIỂM TRA TRONG BẢNG SYNCED ===
+                if existing_sync:
+                    old_sync_time = existing_sync.synced_at
+                    time_diff = abs((trans_time - old_sync_time).total_seconds())
+                    
+                    if time_diff <= 1:  # Cùng thời gian
+                        logger.warning(f"⏭️ Mã {code} đã được đồng bộ cùng thời gian, từ chối")
+                        rejected += 1
+                        continue
+                    else:
+                        logger.info(f"✅ Mã {code} đã được đồng bộ ở thời gian khác, vẫn cho phép")
+                
+                # === KIỂM TRA THỜI GIAN QUÁ CŨ ===
+                time_now = datetime.now()
+                if (time_now - trans_time).total_seconds() > 3600:  # Quá 60 phút
+                    logger.warning(f"⏰ Giao dịch {code} quá cũ ({(time_now - trans_time).total_seconds()/60:.1f} phút)")
+                    rejected += 1
+                    continue
+                
+                # === TÌM HOẶC TẠO USER ===
+                user = get_or_create_user(user_id, username)
+                
+                # === TẠO GIAO DỊCH MỚI ===
+                new_trans = Transaction(
+                    user_id=user.id,
+                    amount=amount,
+                    type='deposit',
+                    status='pending',
+                    transaction_code=code,
+                    description=f"Auto-synced: {code}",
+                    created_at=trans_time  # Dùng thời gian gốc
+                )
+                db.session.add(new_trans)
+                
+                # === LƯU VÀO BẢNG SYNCED ===
+                sync_record = SyncedTransaction(
+                    transaction_code=code,
+                    user_id=user_id,
+                    amount=amount,
+                    source='daemon',
+                    transaction_time=trans_time
+                )
+                db.session.add(sync_record)
+                
+                synced += 1
+                logger.info(f"✅ Đồng bộ giao dịch {code} cho user {user.user_id} (thời gian: {trans_time})")
             
             db.session.commit()
             
@@ -245,6 +321,7 @@ def api_sync_pending():
                 "success": True,
                 "synced": synced,
                 "skipped": skipped,
+                "rejected": rejected,
                 "total": len(transactions)
             }), 200
             
