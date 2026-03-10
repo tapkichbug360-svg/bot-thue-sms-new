@@ -67,46 +67,47 @@ def setup_sepay_webhook(app):
                     transaction_code=transaction_code
                 ).first()
                 
-                # ===== XÁC ĐỊNH USER - CHỈ DÙNG USER CÓ SẴN =====
+                # ===== XÁC ĐỊNH USER - ÁP DỤNG CHO TẤT CẢ USER =====
                 target_user = None
                 
-                # CÁCH 1: Tìm user_id trong nội dung (ƯU TIÊN NHẤT)
+                # CÁCH 1: Tìm user_id trong nội dung (ƯU TIÊN NHẤT - CHO MỌI USER)
+                # Format: "tu 123456789", "tu123456789", "từ 123456789"
                 user_match = re.search(r'tu[_\s]*(\d+)', content, re.IGNORECASE)
                 if user_match:
                     found_user_id = int(user_match.group(1))
                     target_user = User.query.filter_by(user_id=found_user_id).first()
                     if target_user:
-                        logger.info(f"✅ Cách 1: Tìm thấy user từ nội dung: {target_user.user_id}")
+                        logger.info(f"✅ Cách 1: Tìm thấy user {target_user.user_id} từ nội dung")
                 
-                # CÁCH 2: Tìm user_id dạng UID
+                # CÁCH 2: Tìm user_id dạng UID (CHO MỌI USER)
                 if not target_user:
                     uid_match = re.search(r'UID(\d+)', content, re.IGNORECASE)
                     if uid_match:
                         found_user_id = int(uid_match.group(1))
                         target_user = User.query.filter_by(user_id=found_user_id).first()
                         if target_user:
-                            logger.info(f"✅ Cách 2: Tìm thấy user từ UID: {target_user.user_id}")
+                            logger.info(f"✅ Cách 2: Tìm thấy user {target_user.user_id} từ UID")
                 
-                # CÁCH 3: Tìm user_id dạng ID
+                # CÁCH 3: Tìm user_id dạng ID (CHO MỌI USER)
                 if not target_user:
                     id_match = re.search(r'ID(\d+)', content, re.IGNORECASE)
                     if id_match:
                         found_user_id = int(id_match.group(1))
                         target_user = User.query.filter_by(user_id=found_user_id).first()
                         if target_user:
-                            logger.info(f"✅ Cách 3: Tìm thấy user từ ID: {target_user.user_id}")
+                            logger.info(f"✅ Cách 3: Tìm thấy user {target_user.user_id} từ ID")
                 
-                # CÁCH 4: Từ giao dịch có sẵn
+                # CÁCH 4: Từ giao dịch có sẵn (CHO MỌI USER)
                 if not target_user and transaction:
                     target_user = User.query.get(transaction.user_id)
                     if target_user:
-                        logger.info(f"✅ Cách 4: Tìm thấy user từ giao dịch: {target_user.user_id}")
+                        logger.info(f"✅ Cách 4: Tìm thấy user {target_user.user_id} từ giao dịch")
                 
-                # CÁCH 5: Tìm user gần đây nhất
+                # CÁCH 5: Tìm user gần đây nhất (FALLBACK CHO MỌI USER)
                 if not target_user:
                     target_user = User.query.order_by(User.last_active.desc()).first()
                     if target_user:
-                        logger.info(f"✅ Cách 5: Tìm thấy user gần đây: {target_user.user_id}")
+                        logger.warning(f"⚠️ Cách 5: Dùng user gần đây {target_user.user_id} (FALLBACK)")
                 
                 # NẾU KHÔNG TÌM THẤY USER -> TỪ CHỐI GIAO DỊCH
                 if not target_user:
@@ -129,9 +130,9 @@ def setup_sepay_webhook(app):
                         updated_at=current_time
                     )
                     db.session.add(transaction)
-                    logger.info(f"✅ TẠO GIAO DỊCH MỚI: {transaction_code}")
+                    logger.info(f"✅ TẠO GIAO DỊCH MỚI CHO USER {target_user.user_id}: {transaction_code}")
                 else:
-                    logger.info(f"🔄 Giao dịch {transaction_code} đã tồn tại, cộng thêm {amount}đ")
+                    logger.info(f"🔄 Giao dịch {transaction_code} đã tồn tại, cộng thêm {amount}đ cho user {target_user.user_id}")
                     transaction.amount += amount
                     transaction.status = 'success'
                     transaction.updated_at = current_time
@@ -143,8 +144,7 @@ def setup_sepay_webhook(app):
 
                 db.session.commit()
 
-                logger.info(f"✅ CẬP NHẬT THÀNH CÔNG!")
-                logger.info(f"👤 User: {target_user.user_id}")
+                logger.info(f"✅ CẬP NHẬT THÀNH CÔNG CHO USER {target_user.user_id}!")
                 logger.info(f"💰 {old_balance}đ → {target_user.balance}đ (+{amount}đ)")
                 logger.info(f"📌 Giao dịch {transaction_code} sẽ được local gửi thông báo sau khi đồng bộ")
 
