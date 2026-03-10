@@ -621,7 +621,7 @@ def api_sync_bidirectional():
                 logger.info(f"💰 DIRECT UPDATE: User {user_id}: {old_balance}đ → {balance}đ")
                 
                 # Tạo transaction để ghi nhận (nếu cần)
-                trans_code = f"DIRECT_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                trans_code = f"DIRECT_{int(time.time() * 1000)}"
                 transaction = Transaction(
                     user_id=user.id,
                     amount=balance - old_balance,
