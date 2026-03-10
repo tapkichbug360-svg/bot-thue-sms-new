@@ -1886,6 +1886,66 @@ def broadcast():
 @app.route('/deduct')
 def deduct():
     return redirect(url_for('manual'))
+@app.route('/api/get-all-users', methods=['GET'])
+def api_get_all_users():
+    """API cho SePay lấy danh sách users"""
+    with app.app_context():
+        users = User.query.all()
+        result = []
+        for u in users:
+            result.append({
+                'user_id': u.user_id,
+                'balance': u.balance,
+                'username': u.username,
+                'last_active': u.last_active.isoformat() if u.last_active else None
+            })
+        return jsonify(result)
+
+@app.route('/api/receive-sync', methods=['POST'])
+def api_receive_sync():
+    """Nhận đồng bộ từ SePay"""
+    try:
+        data = request.json
+        sync_type = data.get('type')
+        
+        if sync_type == 'sepay_transaction':
+            # Có giao dịch từ SePay
+            tx_data = data.get('data', {})
+            user_id = tx_data.get('user_id')
+            amount = tx_data.get('amount')
+            tx_code = tx_data.get('transaction_code')
+            
+            logger.info(f"📥 Nhận đồng bộ từ SePay: +{amount}đ cho user {user_id}")
+            
+            with app.app_context():
+                user = User.query.filter_by(user_id=user_id).first()
+                if user:
+                    old_balance = user.balance
+                    user.balance += amount
+                    
+                    # Tạo transaction record
+                    transaction = Transaction(
+                        user_id=user.id,
+                        amount=amount,
+                        type='deposit',
+                        status='success',
+                        transaction_code=tx_code,
+                        description=f"Đồng bộ từ SePay",
+                        created_at=datetime.now()
+                    )
+                    db.session.add(transaction)
+                    db.session.commit()
+                    
+                    logger.info(f"✅ Cập nhật local từ SePay: {old_balance} → {user.balance}")
+                    
+                    # Cập nhật UI real-time (nếu dùng WebSocket)
+                    # emit_balance_update(user_id, user.balance)
+                    
+        return jsonify({'success': True})
+        
+    except Exception as e:
+        logger.error(f"❌ Lỗi receive_sync: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/add_money', methods=['POST'])
 def add_money():
@@ -1907,10 +1967,7 @@ def add_money():
             return jsonify({'success': False, 'error': f'Không tìm thấy user {user_id}'})
         
         old_balance = user.balance
-        print(f"  Balance cũ trong DB: {old_balance}đ")
-        
         user.balance += amount
-        print(f"  Balance mới trong DB: {user.balance}đ")
         
         transaction_code = f"ADD_{datetime.now().strftime('%Y%m%d%H%M%S')}_{secrets.token_hex(3).upper()}"
         
@@ -1926,10 +1983,35 @@ def add_money():
         
         db.session.add(transaction)
         db.session.commit()
-        print(f"  ✅ Đã commit vào database local")
         
-        # ===== PUSH LÊN RENDER NGAY =====
+        # ===== ĐỒNG BỘ LÊN SEPAY (THÊM MỚI) =====
         try:
+            SEPAY_URL = os.getenv('SEPAY_URL', 'https://bot-thue-sms-sepay.onrender.com')  # URL của SePay bot
+            
+            # Gửi đồng bộ lên SePay
+            sync_data = {
+                'type': 'manual_transaction',
+                'user_id': user.user_id,
+                'amount': amount,
+                'balance': user.balance,
+                'transaction_code': transaction_code,
+                'reason': reason,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            # Gửi đến SePay
+            response = requests.post(
+                f"{SEPAY_URL}/api/receive-sync",
+                json=sync_data,
+                timeout=5
+            )
+            
+            if response.status_code == 200:
+                logger.info(f"✅ Đã đồng bộ cộng tiền lên SePay")
+            else:
+                logger.warning(f"⚠️ Đồng bộ SePay thất bại: {response.status_code}")
+                
+            # Đồng bộ lên Render như cũ
             RENDER_URL = "https://bot-thue-sms-new.onrender.com"
             push_data = {
                 'user_id': user.user_id,
@@ -1937,27 +2019,16 @@ def add_money():
                 'username': user.username or f"user_{user.user_id}"
             }
             
-            print(f"  📤 Push lên Render: {push_data}")
-            
-            # DÙNG API sync-bidirectional
             response = requests.post(
                 f"{RENDER_URL}/api/sync-bidirectional",
                 json=push_data,
                 timeout=5
             )
             
-            if response.status_code == 200:
-                print(f"  ✅ Push thành công! Status: {response.status_code}")
-                logger.info(f"✅ Đã push balance {user.balance}đ lên Render")
-            else:
-                print(f"  ❌ Push thất bại! Status: {response.status_code}")
-                print(f"  Response: {response.text}")
-                    
         except Exception as e:
-            print(f"  ❌ Lỗi push: {e}")
-            logger.error(f"❌ Lỗi push lên Render: {e}")
+            logger.error(f"❌ Lỗi đồng bộ: {e}")
         
-        # Gửi thông báo Telegram
+        # Gửi Telegram
         message = (
             f"💰 *NẠP TIỀN THÀNH CÔNG!*\n\n"
             f"• *Số tiền:* +{amount:,}đ\n"
@@ -1967,9 +2038,6 @@ def add_money():
             f"• *Thời gian:* {datetime.now().strftime('%H:%M:%S %d/%m/%Y')}"
         )
         send_telegram_notification(user.user_id, message)
-        
-        print(f"  ✅ Hoàn tất! Balance mới: {user.balance}đ")
-        print("-" * 50)
         
         return jsonify({'success': True, 'new_balance': user.balance})
 
@@ -2008,51 +2076,96 @@ def deduct_money():
         db.session.add(transaction)
         db.session.commit()
         
-        # ===== PUSH LÊN RENDER NGAY (ĐÃ SỬA) =====
+        # ===== ĐỒNG BỘ LÊN SEPAY (THÊM MỚI) =====
         try:
-            RENDER_URL = "https://bot-thue-sms-new.onrender.com"  # Cứng hóa URL đúng
+            SEPAY_URL = os.getenv('SEPAY_URL', 'https://bot-thue-sms-sepay.onrender.com')
+            
+            sync_data = {
+                'type': 'manual_transaction',
+                'user_id': user.user_id,
+                'amount': -amount,  # Âm để biết là trừ
+                'balance': user.balance,
+                'transaction_code': transaction_code,
+                'reason': reason,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            response = requests.post(
+                f"{SEPAY_URL}/api/receive-sync",
+                json=sync_data,
+                timeout=5
+            )
+            
+            # Đồng bộ lên Render
+            RENDER_URL = "https://bot-thue-sms-new.onrender.com"
             push_data = {
                 'user_id': user.user_id,
                 'balance': user.balance,
                 'username': user.username or f"user_{user.user_id}"
             }
             
-            # DÙNG sync-bidirectional (GIỐNG add_money)
-            response = requests.post(
+            requests.post(
                 f"{RENDER_URL}/api/sync-bidirectional",
                 json=push_data,
                 timeout=5
             )
             
-            if response.status_code == 200:
-                logger.info(f"✅ Đã push balance {user.balance}đ lên Render qua sync-bidirectional")
-            else:
-                # Thử API dự phòng
-                response2 = requests.post(
-                    f"{RENDER_URL}/api/force-sync-user",
-                    json={'user_id': user.user_id},
-                    timeout=5
-                )
-                if response2.status_code == 200:
-                    logger.info(f"✅ Đã push qua force-sync-user")
-                else:
-                    logger.warning(f"⚠️ Không thể push lên Render, code: {response.status_code}")
-                    
         except Exception as e:
-            logger.error(f"❌ Lỗi push lên Render: {e}")
+            logger.error(f"❌ Lỗi đồng bộ: {e}")
         
-        # Gửi thông báo Telegram
+        # Gửi Telegram
         message = (
             f"💸 *TRỪ TIỀN THỦ CÔNG*\n\n"
             f"• *Số tiền:* -{amount:,}đ\n"
             f"• *Mã GD:* `{transaction_code}`\n"
             f"• *Số dư mới:* {user.balance:,}đ\n"
-            f"• *Lý do:* {reason}\n"
-            f"• *Thời gian:* {datetime.now().strftime('%H:%M:%S %d/%m/%Y')}"
+            f"• *Lý do:* {reason}"
         )
         send_telegram_notification(user.user_id, message)
         
         return jsonify({'success': True, 'new_balance': user.balance})
+
+# ===== THÊM ROUTE KIỂM TRA ĐỒNG BỘ =====
+@app.route('/sync-status')
+def sync_status():
+    """Trang kiểm tra trạng thái đồng bộ"""
+    return render_template_string('''
+    <div class="card mt-4">
+        <div class="card-header bg-info text-white">
+            <h5><i class="bi bi-arrow-repeat"></i> Trạng thái đồng bộ</h5>
+        </div>
+        <div class="card-body">
+            <div class="row">
+                <div class="col-md-6">
+                    <h6>Kết nối SePay</h6>
+                    <div id="sepay-status">Đang kiểm tra...</div>
+                </div>
+                <div class="col-md-6">
+                    <h6>Kết nối Render</h6>
+                    <div id="render-status">Đang kiểm tra...</div>
+                </div>
+            </div>
+            <button class="btn btn-primary mt-3" onclick="checkSync()">
+                <i class="bi bi-arrow-repeat"></i> Kiểm tra lại
+            </button>
+        </div>
+    </div>
+    
+    <script>
+    function checkSync() {
+        fetch('/api/check-sync')
+            .then(r => r.json())
+            .then(data => {
+                document.getElementById('sepay-status').innerHTML = 
+                    data.sepay ? '✅ Kết nối tốt' : '❌ Mất kết nối';
+                document.getElementById('render-status').innerHTML = 
+                    data.render ? '✅ Kết nối tốt' : '❌ Mất kết nối';
+            });
+    }
+    checkSync();
+    setInterval(checkSync, 30000);
+    </script>
+    ''')
 
 @app.route('/send_message', methods=['POST'])
 def send_message():

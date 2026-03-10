@@ -1,4 +1,7 @@
-﻿from flask import request, jsonify
+﻿# ===== webhook.py - CẬP NHẬT =====
+# GIỮ NGUYÊN CẤU TRÚC CODE GỐC, CHỈ THÊM TÍNH NĂNG ĐỒNG BỘ
+
+from flask import request, jsonify
 import logging
 from bot import app
 from database.models import User, Transaction, db
@@ -8,7 +11,10 @@ import re
 import asyncio
 import hashlib
 from telegram import Bot
-import requests  # THÊM IMPORT requests
+import requests
+import threading
+import time
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -18,9 +24,18 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 
 telegram_bot = Bot(token=BOT_TOKEN) if BOT_TOKEN else None
 
+# ===== CẤU HÌNH ĐỒNG BỘ =====
+RENDER_URL = os.getenv('RENDER_URL', 'https://bot-thue-sms-new.onrender.com')
+LOCAL_URL = os.getenv('LOCAL_URL', 'http://localhost:5000')  # URL của dashboard local
+SYNC_ENABLED = True
+
+# Cache để tránh đồng bộ vòng lặp vô hạn
+processed_transactions = set()
+last_sync_time = datetime.now()
+
 # ===== HÀM GỬI TELEGRAM ĐỒNG BỘ =====
 def send_telegram_sync(chat_id, message):
-    """Gửi Telegram đồng bộ - KHÔNG CẦN ASYNC"""
+    """Gửi Telegram đồng bộ - GIỮ NGUYÊN CODE GỐC"""
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
         payload = {
@@ -42,6 +57,229 @@ def send_telegram_sync(chat_id, message):
         logger.error(f"❌ Lỗi gửi Telegram: {e}")
         return False
 
+# ===== HÀM ĐỒNG BỘ LÊN RENDER =====
+def sync_to_render(user_data):
+    """Đồng bộ dữ liệu user lên Render"""
+    if not SYNC_ENABLED:
+        return
+    
+    try:
+        # Tránh trùng lặp
+        tx_key = f"sync_{user_data.get('user_id')}_{int(time.time())}"
+        if tx_key in processed_transactions:
+            return
+        
+        # Đồng bộ qua nhiều API để đảm bảo thành công
+        apis = [
+            f"{RENDER_URL}/api/sync-bidirectional",
+            f"{RENDER_URL}/api/force-sync-user",
+            f"{RENDER_URL}/api/update-balance"
+        ]
+        
+        for api in apis:
+            try:
+                response = requests.post(
+                    api,
+                    json=user_data,
+                    timeout=3
+                )
+                if response.status_code == 200:
+                    logger.info(f"✅ Đồng bộ lên Render thành công qua {api}")
+                    processed_transactions.add(tx_key)
+                    
+                    # Xóa cache cũ
+                    if len(processed_transactions) > 100:
+                        processed_transactions.clear()
+                    return True
+            except:
+                continue
+        
+        logger.warning(f"⚠️ Không thể đồng bộ lên Render qua bất kỳ API nào")
+        return False
+        
+    except Exception as e:
+        logger.error(f"❌ Lỗi đồng bộ lên Render: {e}")
+        return False
+
+# ===== HÀM LẤY DỮ LIỆU TỪ LOCAL DASHBOARD =====
+def fetch_from_local():
+    """Lấy dữ liệu mới nhất từ Local Dashboard"""
+    try:
+        response = requests.get(
+            f"{LOCAL_URL}/api/get-all-users",
+            timeout=3
+        )
+        if response.status_code == 200:
+            return response.json()
+    except:
+        pass
+    return None
+
+# ===== HÀM ĐỒNG BỘ XUỐNG LOCAL =====
+def sync_to_local(transaction_data):
+    """Đồng bộ giao dịch xuống Local Dashboard"""
+    if not SYNC_ENABLED:
+        return
+    
+    try:
+        # Tránh trùng lặp
+        tx_id = transaction_data.get('transaction_code', '')
+        if tx_id in processed_transactions:
+            return
+        
+        # Gửi đến local dashboard
+        response = requests.post(
+            f"{LOCAL_URL}/api/receive-sync",
+            json={
+                'type': 'sepay_transaction',
+                'data': transaction_data,
+                'timestamp': datetime.now().isoformat()
+            },
+            timeout=3
+        )
+        
+        if response.status_code == 200:
+            logger.info(f"✅ Đồng bộ xuống Local thành công: {tx_id}")
+            processed_transactions.add(tx_id)
+            
+            # Xóa cache cũ
+            if len(processed_transactions) > 100:
+                processed_transactions.clear()
+            return True
+        else:
+            logger.warning(f"⚠️ Local trả về lỗi: {response.status_code}")
+            
+    except Exception as e:
+        logger.error(f"❌ Lỗi đồng bộ xuống Local: {e}")
+    
+    return False
+
+# ===== HÀM ĐỒNG BỘ 2 CHIỀU =====
+def bidirectional_sync(user_data, transaction_data=None):
+    """Đồng bộ 2 chiều: Lên Render và Xuống Local"""
+    
+    # 1. Đồng bộ lên Render
+    sync_to_render(user_data)
+    
+    # 2. Nếu có giao dịch, đồng bộ xuống Local
+    if transaction_data:
+        sync_to_local(transaction_data)
+    
+    # 3. Lấy dữ liệu mới từ Local để kiểm tra
+    local_data = fetch_from_local()
+    if local_data:
+        logger.info(f"📊 Local dashboard có {len(local_data)} users")
+
+# ===== API CHO LOCAL DASHBOARD GỌI =====
+@app.route('/api/receive-sync', methods=['POST'])
+def receive_sync():
+    """Nhận đồng bộ từ Local Dashboard"""
+    try:
+        data = request.json
+        sync_type = data.get('type')
+        
+        if sync_type == 'manual_transaction':
+            # Có giao dịch thủ công từ Local
+            user_id = data.get('user_id')
+            amount = data.get('amount')
+            tx_code = data.get('transaction_code')
+            
+            logger.info(f"📥 Nhận đồng bộ từ Local: Cộng/trừ {amount}đ cho user {user_id}")
+            
+            # Cập nhật vào database của bot
+            with app.app_context():
+                user = User.query.filter_by(user_id=user_id).first()
+                if user:
+                    old_balance = user.balance
+                    
+                    # Tạo transaction
+                    transaction = Transaction(
+                        user_id=user.id,
+                        amount=abs(amount),
+                        type='deposit' if amount > 0 else 'deduct',
+                        status='success',
+                        transaction_code=tx_code,
+                        description=f"Đồng bộ từ Dashboard: {data.get('reason', '')}",
+                        created_at=datetime.now()
+                    )
+                    db.session.add(transaction)
+                    db.session.commit()
+                    
+                    logger.info(f"✅ Đã đồng bộ từ Local: User {user_id} balance {old_balance} → {user.balance}")
+                    
+                    return jsonify({
+                        'success': True,
+                        'message': 'Đã đồng bộ thành công'
+                    })
+        
+        elif sync_type == 'request_sync':
+            # Yêu cầu đồng bộ tất cả users
+            users = []
+            with app.app_context():
+                all_users = User.query.all()
+                for u in all_users:
+                    users.append({
+                        'user_id': u.user_id,
+                        'balance': u.balance,
+                        'username': u.username
+                    })
+            
+            return jsonify({
+                'success': True,
+                'users': users,
+                'count': len(users)
+            })
+        
+        return jsonify({'success': True})
+        
+    except Exception as e:
+        logger.error(f"❌ Lỗi receive_sync: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# ===== API ĐỒNG BỘ 2 CHIỀU CHO RENDER =====
+@app.route('/api/sync-bidirectional', methods=['POST'])
+def sync_bidirectional():
+    """API đồng bộ 2 chiều (Render gọi xuống)"""
+    try:
+        data = request.json
+        user_id = data.get('user_id')
+        balance = data.get('balance')
+        
+        if not user_id:
+            return jsonify({'success': False, 'error': 'Thiếu user_id'}), 400
+        
+        with app.app_context():
+            user = User.query.filter_by(user_id=user_id).first()
+            if not user:
+                # Tạo user mới nếu chưa có
+                user = User(
+                    user_id=user_id,
+                    username=data.get('username', f'user_{user_id}'),
+                    balance=balance or 0,
+                    created_at=datetime.now()
+                )
+                db.session.add(user)
+                logger.info(f"✅ Tạo user mới từ đồng bộ: {user_id}")
+            else:
+                # Cập nhật balance
+                if balance is not None:
+                    old = user.balance
+                    user.balance = balance
+                    logger.info(f"✅ Cập nhật balance từ Render: {user_id} {old} → {balance}")
+            
+            db.session.commit()
+            
+            return jsonify({
+                'success': True,
+                'user_id': user.user_id,
+                'balance': user.balance
+            })
+            
+    except Exception as e:
+        logger.error(f"❌ Lỗi sync_bidirectional: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# ===== WEBHOOK CHÍNH - GIỮ NGUYÊN CODE GỐC, CHỈ THÊM ĐỒNG BỘ =====
 def setup_sepay_webhook(app):
     @app.route('/webhook/sepay', methods=['POST'])
     def sepay_webhook():
@@ -193,27 +431,30 @@ def setup_sepay_webhook(app):
                 except Exception as e:
                     logger.error(f"❌ Lỗi gửi Telegram: {e}")
                 
-                # ===== PUSH LÊN RENDER NGAY =====
+                # ===== ĐỒNG BỘ 2 CHIỀU (THÊM MỚI) =====
                 try:
-                    RENDER_URL = os.getenv('RENDER_URL', 'https://bot-thue-sms-new.onrender.com')
+                    # Chuẩn bị dữ liệu user để đồng bộ
+                    user_data = {
+                        'user_id': target_user.user_id,
+                        'balance': target_user.balance,
+                        'username': target_user.username or f"user_{target_user.user_id}"
+                    }
                     
-                    push_response = requests.post(
-                        f"{RENDER_URL}/api/sync-bidirectional",
-                        json={
-                            'user_id': target_user.user_id,
-                            'balance': target_user.balance,
-                            'username': target_user.username or f"user_{target_user.user_id}"
-                        },
-                        timeout=5
-                    )
+                    # Chuẩn bị dữ liệu giao dịch để đồng bộ xuống Local
+                    transaction_data = {
+                        'transaction_code': transaction_code,
+                        'user_id': target_user.user_id,
+                        'amount': amount,
+                        'type': 'deposit',
+                        'time': current_time.isoformat(),
+                        'description': f"NAP qua SePay: {content}"
+                    }
                     
-                    if push_response.status_code == 200:
-                        logger.info(f"✅ Đã push balance {target_user.balance}đ lên Render")
-                    else:
-                        logger.warning(f"⚠️ Push balance thất bại: {push_response.status_code}")
-                        
+                    # Đồng bộ 2 chiều
+                    bidirectional_sync(user_data, transaction_data)
+                    
                 except Exception as e:
-                    logger.error(f"❌ Lỗi push lên Render: {e}")
+                    logger.error(f"❌ Lỗi đồng bộ: {e}")
                 
                 logger.info(f"📌 Giao dịch {transaction_code} hoàn tất")
 
@@ -234,3 +475,44 @@ def setup_sepay_webhook(app):
             import traceback
             traceback.print_exc()
             return jsonify({"success": False}), 500
+
+    # ===== THÊM API ĐỒNG BỘ ĐỊNH KỲ =====
+    @app.route('/api/force-sync', methods=['POST'])
+    def force_sync():
+        """API để đồng bộ cưỡng chế tất cả dữ liệu"""
+        try:
+            with app.app_context():
+                users = User.query.all()
+                sync_data = []
+                
+                for u in users:
+                    sync_data.append({
+                        'user_id': u.user_id,
+                        'balance': u.balance,
+                        'username': u.username
+                    })
+                
+                # Đồng bộ lên Render
+                for user_data in sync_data:
+                    sync_to_render(user_data)
+                
+                return jsonify({
+                    'success': True,
+                    'synced': len(sync_data),
+                    'users': sync_data
+                })
+                
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)}), 500
+
+    # ===== API KIỂM TRA ĐỒNG BỘ =====
+    @app.route('/api/sync-status', methods=['GET'])
+    def sync_status():
+        return jsonify({
+            'status': 'active',
+            'sync_enabled': SYNC_ENABLED,
+            'render_url': RENDER_URL,
+            'local_url': LOCAL_URL,
+            'processed_count': len(processed_transactions),
+            'last_sync': last_sync_time.isoformat() if last_sync_time else None
+        })
