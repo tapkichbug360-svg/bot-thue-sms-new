@@ -381,8 +381,9 @@ class UserSyncDaemon:
                     if local_balance != render_balance:
                         print(f"  ⚠️ User {user_id}: Số dư lệch nhưng cùng thời gian")
                         
-                        # === CHỈ CẬP NHẬT NẾU RENDER CAO HƠN LOCAL ===
+                        # === FIX LỖI: CHỈ CẬP NHẬT KHI RENDER CAO HƠN LOCAL ===
                         if render_balance > local_balance:
+                            # Render cao hơn → User vừa nạp tiền
                             cursor.execute('''
                                 UPDATE users 
                                 SET balance = ? 
@@ -397,11 +398,12 @@ class UserSyncDaemon:
                             print(f"     ✅ Đã cập nhật balance: {local_balance}đ → {render_balance}đ (+{amount_diff}đ)")
                             
                         elif render_balance < local_balance:
+                            # Render thấp hơn → User vừa thuê số - GIỮ NGUYÊN
                             print(f"     ⚠️ Render thấp hơn local: {render_balance}đ < {local_balance}đ")
                             print(f"        Giữ nguyên local (không cập nhật)")
                             
                         else:
-                            # Trường hợp bằng nhau (không xảy ra vì đã check !=)
+                            # Trường hợp bằng nhau (không xảy ra)
                             pass
                     else:
                         print(f"  ✅ User {user_id}: Đã đồng bộ {local_balance}đ")
