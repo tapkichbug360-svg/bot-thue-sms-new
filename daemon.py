@@ -4,6 +4,10 @@ import time
 import os
 import json
 from datetime import datetime, timedelta, timezone
+import concurrent.futures
+import threading
+from collections import defaultdict
+import psutil
 
 # ==================== CẤU HÌNH ====================
 VN_TZ = timezone(timedelta(hours=7))
@@ -21,6 +25,28 @@ class UserSyncDaemon:
         self.last_sync = {}
         self.failed_pushes_file = "failed_pushes.json"
         self.db_path = os.path.join('database', 'bot.db')
+        
+        # ===== THAM SỐ TỐI ƯU =====
+        self.batch_size = 50           # Số user mỗi batch
+        self.batch_delay = 1           # Nghỉ 1s giữa các batch
+        self.max_workers = 10           # Số luồng xử lý song song
+        self.push_timeout = 5           # Timeout push (giây)
+        self.pull_timeout = 10          # Timeout pull (giây)
+        self.retry_limit = 2            # Số lần thử lại
+        self.stats_interval = 300       # In stats mỗi 5 phút
+        
+        # ===== THEO DÕI HIỆU SUẤT =====
+        self.stats = {
+            'total_processed': 0,
+            'push_success': 0,
+            'push_failed': 0,
+            'pull_success': 0,
+            'pull_failed': 0,
+            'total_time': 0,
+            'avg_response': 0,
+            'errors': defaultdict(int)
+        }
+        self.stats_lock = threading.Lock()
     
     # ==================== HÀM TIỆN ÍCH ====================
     def get_db_connection(self):
@@ -35,10 +61,39 @@ class UserSyncDaemon:
             "SUCCESS": "\033[92m",  # Xanh lá
             "WARNING": "\033[93m",  # Vàng
             "ERROR": "\033[91m",    # Đỏ
+            "PERF": "\033[95m",     # Tím (performance)
             "RESET": "\033[0m"
         }
         color = colors.get(level, colors["INFO"])
         print(f"{color}[{timestamp}] {message}{colors['RESET']}")
+    
+    def update_stats(self, key, value=1):
+        """Cập nhật thống kê an toàn luồng"""
+        with self.stats_lock:
+            if key in self.stats:
+                self.stats[key] += value
+            else:
+                self.stats[key] = value
+    
+    def print_stats(self):
+        """In thống kê hiệu suất"""
+        self.log("\n" + "="*70, "PERF")
+        self.log("📊 PERFORMANCE STATISTICS", "PERF")
+        self.log("="*70, "PERF")
+        self.log(f"• Total processed: {self.stats['total_processed']}", "PERF")
+        self.log(f"• Push success: {self.stats['push_success']}", "SUCCESS")
+        self.log(f"• Push failed: {self.stats['push_failed']}", "ERROR")
+        self.log(f"• Pull success: {self.stats['pull_success']}", "SUCCESS")
+        self.log(f"• Pull failed: {self.stats['pull_failed']}", "ERROR")
+        self.log(f"• Avg response: {self.stats['avg_response']:.2f}s", "PERF")
+        self.log(f"• Memory: {psutil.Process().memory_percent():.1f}%", "PERF")
+        self.log(f"• CPU: {psutil.Process().cpu_percent():.1f}%", "PERF")
+        
+        if self.stats['errors']:
+            self.log("\n⚠️ TOP ERRORS:", "WARNING")
+            for error, count in sorted(self.stats['errors'].items(), key=lambda x: x[1], reverse=True)[:5]:
+                self.log(f"   • {error}: {count}", "WARNING")
+        self.log("="*70, "PERF")
     
     # ==================== LẤY DỮ LIỆU TỪ LOCAL ====================
     def get_all_local_users(self):
@@ -62,6 +117,7 @@ class UserSyncDaemon:
             return result
         except Exception as e:
             self.log(f"❌ Lỗi lấy user local: {e}", "ERROR")
+            self.update_stats('errors', f"DB_ERROR: {str(e)[:50]}")
             return []
     
     def get_user_balance(self, user_id):
@@ -90,19 +146,20 @@ class UserSyncDaemon:
             self.log(f"❌ Lỗi cập nhật local user {user_id}: {e}", "ERROR")
             return False
     
-    def get_pending_transactions(self):
-        """Lấy các transaction đang chờ xử lý"""
+    def get_pending_transactions(self, limit=50):
+        """Lấy các transaction đang chờ xử lý (có giới hạn)"""
         try:
             conn = self.get_db_connection()
             cursor = conn.cursor()
             
-            # Thử với bảng deposit_transactions
             try:
                 cursor.execute("""
                     SELECT transaction_id, amount, user_id, status
                     FROM deposit_transactions 
                     WHERE status = 'pending'
-                """)
+                    ORDER BY created_at ASC
+                    LIMIT ?
+                """, (limit,))
                 pending = cursor.fetchall()
                 
                 result = []
@@ -130,9 +187,46 @@ class UserSyncDaemon:
             self.log(f"❌ Lỗi lấy transaction: {e}", "ERROR")
             return []
     
+    def get_active_users(self, minutes=60):
+        """Lấy user có hoạt động trong khoảng thời gian"""
+        try:
+            conn = self.get_db_connection()
+            cursor = conn.cursor()
+            
+            time_threshold = datetime.now() - timedelta(minutes=minutes)
+            
+            # User có rental gần đây
+            cursor.execute("""
+                SELECT DISTINCT user_id FROM rentals 
+                WHERE created_at > ? OR refunded_at > ?
+            """, (time_threshold, time_threshold))
+            
+            active_ids = set([row[0] for row in cursor.fetchall()])
+            
+            # User có transaction gần đây
+            cursor.execute("""
+                SELECT DISTINCT user_id FROM deposit_transactions 
+                WHERE created_at > ?
+            """, (time_threshold,))
+            
+            active_ids.update([row[0] for row in cursor.fetchall()])
+            
+            conn.close()
+            
+            # Lấy thông tin đầy đủ
+            all_users = self.get_all_local_users()
+            active_users = [u for u in all_users if u['user_id'] in active_ids]
+            
+            self.log(f"⚡ Active users ({minutes}ph): {len(active_users)}/{len(all_users)}", "INFO")
+            return active_users, [u for u in all_users if u['user_id'] not in active_ids]
+            
+        except Exception as e:
+            self.log(f"❌ Lỗi lấy active users: {e}", "ERROR")
+            return [], self.get_all_local_users()
+    
     # ==================== GỬI THÔNG BÁO TELEGRAM ====================
     def send_telegram_notification(self, user_id, new_balance, amount, type="NAP"):
-        """Gửi thông báo Telegram - TIMEOUT 10s"""
+        """Gửi thông báo Telegram - KHÔNG BLOCK"""
         try:
             current_time = datetime.now().strftime('%H:%M:%S %d/%m/%Y')
             
@@ -158,31 +252,26 @@ class UserSyncDaemon:
                 'parse_mode': 'Markdown'
             }
             
-            # TIMEOUT 10s
+            # Timeout 10s
             response = requests.post(url, json=payload, timeout=10)
             
             if response.status_code == 200:
-                self.log(f"📨 Đã gửi thông báo Telegram cho user {user_id}", "SUCCESS")
+                self.log(f"📨 Đã gửi Telegram cho user {user_id}", "SUCCESS")
             else:
-                self.log(f"⚠️ Lỗi gửi Telegram: {response.status_code}", "WARNING")
+                self.log(f"⚠️ Telegram lỗi {response.status_code}", "WARNING")
                 
         except requests.exceptions.Timeout:
-            self.log(f"⏰ Telegram timeout (bỏ qua)", "WARNING")
+            self.log(f"⏰ Telegram timeout", "WARNING")
         except Exception as e:
-            self.log(f"⚠️ Lỗi gửi Telegram: {e}", "WARNING")
+            self.log(f"⚠️ Telegram lỗi: {e}", "WARNING")
     
     # ==================== ĐẨY DỮ LIỆU LÊN RENDER ====================
     def push_user_to_render(self, user_id, balance, username, reason=""):
-        """
-        ĐẨY USER LÊN RENDER - CHỈ DÙNG sync-bidirectional
-        """
-        max_retries = 2
-        retry_count = 0
+        """Đẩy user lên Render - CÓ ĐO THỜI GIAN"""
+        start_time = time.time()
         
-        while retry_count < max_retries:
+        for attempt in range(self.retry_limit):
             try:
-                self.log(f"📤 Push user {user_id}: {balance}đ lên Render [Lần {retry_count + 1}]", "INFO")
-                
                 response = requests.post(
                     f"{RENDER_URL}/api/sync-bidirectional",
                     json={
@@ -190,30 +279,111 @@ class UserSyncDaemon:
                         'balance': balance,
                         'username': username
                     },
-                    timeout=5
+                    timeout=self.push_timeout
                 )
                 
+                elapsed = time.time() - start_time
+                self.update_stats('total_processed')
+                self.update_stats('avg_response', (elapsed - self.stats['avg_response']) / (self.stats['total_processed'] + 1))
+                
                 if response.status_code == 200:
-                    self.log(f"✅ Push user {user_id} thành công!", "SUCCESS")
+                    self.update_stats('push_success')
                     return True
                 else:
-                    self.log(f"⚠️ sync-bidirectional trả về {response.status_code}", "WARNING")
+                    self.log(f"⚠️ Push user {user_id} lỗi {response.status_code}", "WARNING")
                     
             except Exception as e:
-                self.log(f"⚠️ Lỗi: {e}", "WARNING")
-            
-            retry_count += 1
-            if retry_count < max_retries:
-                self.log(f"⏳ Chờ 2s...", "INFO")
-                time.sleep(2)
+                self.log(f"⚠️ Lần {attempt + 1} lỗi: {e}", "WARNING")
+                if attempt < self.retry_limit - 1:
+                    time.sleep(2 ** attempt)
         
-        # Nếu thất bại
+        self.update_stats('push_failed')
         self._save_failed_push(user_id, balance, username, reason)
-        self.log(f"❌ Push user {user_id} thất bại", "ERROR")
         return False
     
+    def push_user_batch(self, users):
+        """Đẩy nhiều user song song"""
+        success = 0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = []
+            for user in users:
+                future = executor.submit(
+                    self.push_user_to_render,
+                    user['user_id'],
+                    user['balance'],
+                    user['username']
+                )
+                futures.append(future)
+            
+            for future in concurrent.futures.as_completed(futures):
+                if future.result():
+                    success += 1
+        
+        return success
+    
+    # ==================== KÉO DỮ LIỆU TỪ RENDER VỀ ====================
+    def pull_user_from_render(self, user_id):
+        """Kéo user từ Render về - CÓ ĐO THỜI GIAN"""
+        start_time = time.time()
+        
+        try:
+            response = requests.post(
+                f"{RENDER_URL}/api/force-sync-user",
+                json={'user_id': user_id},
+                timeout=self.pull_timeout
+            )
+            
+            elapsed = time.time() - start_time
+            
+            if response.status_code == 200:
+                data = response.json()
+                render_balance = data.get('balance')
+                
+                if render_balance is not None:
+                    local_balance = self.get_user_balance(user_id)
+                    
+                    if render_balance != local_balance:
+                        self.update_local_balance(user_id, render_balance)
+                        diff = render_balance - local_balance
+                        self.log(f"✅ User {user_id}: {local_balance}đ → {render_balance}đ ({diff:+,}đ)", "SUCCESS")
+                        
+                        # Gửi Telegram không block
+                        threading.Thread(
+                            target=self.send_telegram_notification,
+                            args=(user_id, render_balance, diff, "NAP" if diff > 0 else "TIÊU")
+                        ).start()
+                    
+                    self.update_stats('pull_success')
+                    return True
+            else:
+                self.log(f"⚠️ Pull user {user_id} lỗi {response.status_code}", "WARNING")
+                self.update_stats('pull_failed')
+                
+        except Exception as e:
+            self.log(f"❌ Lỗi pull user {user_id}: {e}", "ERROR")
+            self.update_stats('pull_failed')
+            self.update_stats('errors', f"PULL_ERROR: {str(e)[:50]}")
+        
+        return False
+    
+    def pull_user_batch(self, users):
+        """Kéo nhiều user song song"""
+        success = 0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = []
+            for user in users:
+                future = executor.submit(self.pull_user_from_render, user['user_id'])
+                futures.append(future)
+            
+            for future in concurrent.futures.as_completed(futures):
+                if future.result():
+                    success += 1
+        
+        return success
+    
+    # ==================== XỬ LÝ FAILED PUSHES ====================
     def _save_failed_push(self, user_id, balance, username, reason):
-        """Lưu các push thất bại để xử lý sau"""
+        """Lưu push thất bại"""
         try:
             failed = []
             if os.path.exists(self.failed_pushes_file):
@@ -228,67 +398,16 @@ class UserSyncDaemon:
                 'time': datetime.now().isoformat()
             })
             
-            # Giới hạn 100 entry
-            if len(failed) > 100:
-                failed = failed[-100:]
+            # Giới hạn 200 entry
+            if len(failed) > 200:
+                failed = failed[-200:]
             
             with open(self.failed_pushes_file, 'w') as f:
                 json.dump(failed, f, indent=2)
             
-            self.log(f"💾 Đã lưu push thất bại của user {user_id}", "WARNING")
+            self.log(f"💾 Đã lưu push thất bại user {user_id}", "WARNING")
         except Exception as e:
             self.log(f"❌ Lỗi lưu failed push: {e}", "ERROR")
-    
-    def push_transaction_to_render(self, transaction):
-        """Đẩy transaction lên Render"""
-        try:
-            payload = {
-                'transactions': [{
-                    'code': transaction['code'],
-                    'amount': transaction['amount'],
-                    'user_id': transaction['user_id'],
-                    'username': transaction['username'],
-                    'created_at': datetime.now().isoformat()
-                }]
-            }
-            
-            self.log(f"📤 Push transaction {transaction['code']} lên Render", "INFO")
-            
-            response = requests.post(
-                f"{RENDER_URL}/api/sync-pending",
-                json=payload,
-                timeout=5
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                self.log(f"✅ Push transaction {transaction['code']} thành công", "SUCCESS")
-                self.log(f"   Synced: {result.get('synced', 0)}, Rejected: {result.get('rejected', 0)}", "INFO")
-                
-                # Cập nhật status trong local
-                self._update_transaction_status(transaction['code'], 'synced')
-                return True
-            else:
-                self.log(f"⚠️ Push transaction {transaction['code']} thất bại: {response.status_code}", "WARNING")
-                return False
-                
-        except Exception as e:
-            self.log(f"❌ Lỗi push transaction {transaction['code']}: {e}", "ERROR")
-            return False
-    
-    def _update_transaction_status(self, transaction_code, status):
-        """Cập nhật trạng thái transaction"""
-        try:
-            conn = self.get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute(
-                "UPDATE deposit_transactions SET status = ? WHERE transaction_id = ?",
-                (status, transaction_code)
-            )
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            self.log(f"❌ Lỗi cập nhật transaction {transaction_code}: {e}", "ERROR")
     
     def retry_failed_pushes(self):
         """Thử lại các push thất bại"""
@@ -302,22 +421,31 @@ class UserSyncDaemon:
             if not failed:
                 return
             
-            self.log(f"🔄 Đang thử lại {len(failed)} push thất bại...", "INFO")
+            self.log(f"🔄 Thử lại {len(failed)} push thất bại...", "INFO")
             
+            # Thử lại theo batch
             success = []
             remaining = []
             
-            for item in failed:
-                if self.push_user_to_render(
-                    item['user_id'], 
-                    item['balance'], 
-                    item['username'], 
-                    item.get('reason', 'retry')
-                ):
-                    success.append(item)
-                else:
-                    remaining.append(item)
-                time.sleep(0.5)
+            for i in range(0, len(failed), self.batch_size):
+                batch = failed[i:i+self.batch_size]
+                batch_success = 0
+                
+                for item in batch:
+                    if self.push_user_to_render(
+                        item['user_id'], 
+                        item['balance'], 
+                        item['username'], 
+                        item.get('reason', 'retry')
+                    ):
+                        batch_success += 1
+                        success.append(item)
+                    else:
+                        remaining.append(item)
+                    time.sleep(0.1)
+                
+                self.log(f"   Batch {i//self.batch_size + 1}: {batch_success}/{len(batch)} OK", "INFO")
+                time.sleep(self.batch_delay)
             
             # Lưu lại những cái vẫn thất bại
             with open(self.failed_pushes_file, 'w') as f:
@@ -327,93 +455,60 @@ class UserSyncDaemon:
             self.log(f"⏳ Còn lại: {len(remaining)}", "INFO")
             
         except Exception as e:
-            self.log(f"❌ Lỗi retry failed pushes: {e}", "ERROR")
+            self.log(f"❌ Lỗi retry: {e}", "ERROR")
     
-    # ==================== KÉO DỮ LIỆU TỪ RENDER VỀ ====================
-    def pull_user_from_render(self, user_id):
-        """
-        KÉO USER TỪ RENDER VỀ - DÙNG force-sync-user (VÌ sync-bidirectional KHÔNG TRẢ VỀ DATA)
-        """
+    # ==================== ĐỒNG BỘ TRANSACTIONS ====================
+    def push_transaction_to_render(self, transaction):
+        """Đẩy transaction lên Render"""
         try:
-            self.log(f"📥 Đang kéo user {user_id} từ Render về...", "INFO")
+            payload = {
+                'transactions': [{
+                    'code': transaction['code'],
+                    'amount': transaction['amount'],
+                    'user_id': transaction['user_id'],
+                    'username': transaction['username'],
+                    'created_at': datetime.now().isoformat()
+                }]
+            }
             
-            # THỬ force-sync-user TRƯỚC (API CHUYÊN DỤNG CHO PULL)
             response = requests.post(
-                f"{RENDER_URL}/api/force-sync-user",
-                json={'user_id': user_id},
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                render_balance = data.get('balance')
-                
-                if render_balance is not None:
-                    local_balance = self.get_user_balance(user_id)
-                    
-                    if render_balance != local_balance:
-                        self.update_local_balance(user_id, render_balance)
-                        diff = render_balance - local_balance
-                        self.log(f"✅ User {user_id}: {local_balance}đ → {render_balance}đ ({diff:+,}đ)", "SUCCESS")
-                        
-                        # Gửi thông báo
-                        try:
-                            if diff > 0:
-                                self.send_telegram_notification(user_id, render_balance, diff, "NAP")
-                            else:
-                                self.send_telegram_notification(user_id, render_balance, diff, "TIÊU")
-                        except:
-                            pass
-                    else:
-                        self.log(f"✅ User {user_id}: Đã đồng bộ {local_balance}đ", "SUCCESS")
-                    return True
-                else:
-                    self.log(f"⚠️ force-sync-user không trả về balance", "WARNING")
-            else:
-                self.log(f"⚠️ force-sync-user lỗi {response.status_code}", "WARNING")
-                
-            # Nếu force-sync-user không hoạt động, thử sync-bidirectional (nhưng chỉ để log)
-            self.log(f"🔄 Thử sync-bidirectional như dự phòng...", "INFO")
-            response2 = requests.post(
-                f"{RENDER_URL}/api/sync-bidirectional",
-                json={
-                    'user_id': user_id,
-                    'balance': self.get_user_balance(user_id),
-                    'username': f"user_{user_id}"
-                },
+                f"{RENDER_URL}/api/sync-pending",
+                json=payload,
                 timeout=5
             )
             
-            if response2.status_code == 200:
-                self.log(f"⚠️ sync-bidirectional OK nhưng không có balance data", "WARNING")
-                # Giả sử balance không đổi
-                local_balance = self.get_user_balance(user_id)
-                self.log(f"✅ User {user_id}: Giữ nguyên {local_balance}đ", "SUCCESS")
+            if response.status_code == 200:
+                self._update_transaction_status(transaction['code'], 'synced')
                 return True
-            else:
-                self.log(f"⚠️ sync-bidirectional lỗi {response2.status_code}", "WARNING")
-                return False
-                    
-        except requests.exceptions.Timeout:
-            self.log(f"⏰ Timeout khi kéo user {user_id}", "WARNING")
-            return False
+            
         except Exception as e:
-            self.log(f"❌ Lỗi pull user {user_id}: {e}", "ERROR")
-            return False
+            self.log(f"❌ Lỗi push transaction: {e}", "ERROR")
+        
+        return False
+    
+    def _update_transaction_status(self, transaction_code, status):
+        """Cập nhật trạng thái transaction"""
+        try:
+            conn = self.get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE deposit_transactions SET status = ? WHERE transaction_id = ?",
+                (status, transaction_code)
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            self.log(f"❌ Lỗi cập nhật transaction: {e}", "ERROR")
     
     # ==================== ĐỒNG BỘ USER CỤ THỂ ====================
     def sync_user(self, user_id):
         """Đồng bộ một user cụ thể"""
         self.log(f"🔄 Đồng bộ user {user_id}...", "INFO")
         
-        # Lấy thông tin user
         balance = self.get_user_balance(user_id)
         username = f"user_{user_id}"
         
-        # Push lên Render
         push_success = self.push_user_to_render(user_id, balance, username, "sync_single")
-        
-        # Pull từ Render về
         pull_success = self.pull_user_from_render(user_id)
         
         if push_success and pull_success:
@@ -423,98 +518,29 @@ class UserSyncDaemon:
         
         return push_success and pull_success
     
-    # ==================== ĐỒNG BỘ TOÀN BỘ ====================
-    def sync_all_users_push(self):
-        """Đẩy TẤT CẢ user lên Render"""
-        self.log("\n📤 ĐẨY TẤT CẢ USER LÊN RENDER:", "INFO")
+    # ==================== DAEMON CHẠY NỀN (TỐI ƯU) ====================
+    def run_daemon_optimized(self, interval=60, mode="auto"):
+        """
+        Daemon tối ưu cho nhiều user
         
-        local_users = self.get_all_local_users()
-        
-        success_count = 0
-        for user in local_users:
-            if self.push_user_to_render(
-                user['user_id'], 
-                user['balance'], 
-                user['username'], 
-                "sync_all"
-            ):
-                success_count += 1
-            time.sleep(0.2)
-        
-        self.log(f"✅ Đã đẩy {success_count}/{len(local_users)} user lên Render", "SUCCESS")
-        return success_count
-    
-    def sync_all_users_pull(self):
-        """Kéo TẤT CẢ user từ Render về"""
-        self.log("\n📥 KÉO TẤT CẢ USER TỪ RENDER VỀ:", "INFO")
-        
-        local_users = self.get_all_local_users()
-        
-        success_count = 0
-        for user in local_users:
-            if self.pull_user_from_render(user['user_id']):
-                success_count += 1
-            time.sleep(0.2)
-        
-        self.log(f"✅ Đã kéo {success_count}/{len(local_users)} user từ Render về", "SUCCESS")
-        return success_count
-    
-    def sync_all_transactions(self):
-        """Đồng bộ tất cả transaction"""
-        self.log("\n💳 ĐỒNG BỘ TRANSACTIONS:", "INFO")
-        
-        transactions = self.get_pending_transactions()
-        self.log(f"📋 Có {len(transactions)} transaction pending", "INFO")
-        
-        success_count = 0
-        for trans in transactions:
-            if self.push_transaction_to_render(trans):
-                success_count += 1
-            time.sleep(0.2)
-        
-        self.log(f"✅ Đã đồng bộ {success_count}/{len(transactions)} transaction", "SUCCESS")
-        return success_count
-    
-    def full_sync(self):
-        """Đồng bộ TOÀN BỘ (Push + Pull + Transactions)"""
-        self.log("="*70, "INFO")
-        self.log("🚀 BẮT ĐẦU ĐỒNG BỘ TOÀN BỘ 3 CHIỀU", "INFO")
-        self.log("="*70, "INFO")
-        
-        # 1. Thử lại các push thất bại
-        self.retry_failed_pushes()
-        time.sleep(1)
-        
-        # 2. Đẩy tất cả user lên Render
-        push_count = self.sync_all_users_push()
-        time.sleep(1)
-        
-        # 3. Kéo tất cả user từ Render về
-        pull_count = self.sync_all_users_pull()
-        time.sleep(1)
-        
-        # 4. Đồng bộ transactions
-        trans_count = self.sync_all_transactions()
-        
-        self.log("="*70, "INFO")
-        self.log(f"✅ HOÀN TẤT ĐỒNG BỘ TOÀN BỘ", "SUCCESS")
-        self.log(f"   Push: {push_count} user", "INFO")
-        self.log(f"   Pull: {pull_count} user", "INFO")
-        self.log(f"   Transactions: {trans_count}", "INFO")
-        self.log("="*70, "INFO")
-    
-    # ==================== DAEMON CHẠY NỀN ====================
-    def run_daemon(self, interval=10):
-        """Chạy daemon tự động"""
+        Args:
+            interval: Thời gian giữa các cycle (giây)
+            mode: "auto" - tự động phân loại, "active" - chỉ active, "full" - tất cả
+        """
         cycle_count = 0
+        last_stats_time = time.time()
         
         self.log("="*70, "INFO")
-        self.log(f"🚀 DAEMON ĐỒNG BỘ 3 CHIỀU - {interval} GIÂY/LẦN", "INFO")
+        self.log(f"🚀 DAEMON SIÊU TỐI ƯU - {interval} GIÂY/LẦN", "INFO")
+        self.log(f"   • Batch size: {self.batch_size}", "INFO")
+        self.log(f"   • Workers: {self.max_workers}", "INFO")
+        self.log(f"   • Mode: {mode}", "INFO")
         self.log("="*70, "INFO")
         
         while self.running:
             try:
                 cycle_count += 1
+                start_cycle = time.time()
                 vn_time = get_vn_time()
                 
                 self.log(f"\n{'='*70}", "INFO")
@@ -523,62 +549,88 @@ class UserSyncDaemon:
                 # === THỬ LẠI PUSH THẤT BẠI ===
                 self.retry_failed_pushes()
                 
-                # === LẤY DANH SÁCH USER ===
-                local_users = self.get_all_local_users()
+                # === LẤY USER THEO MODE ===
+                if mode == "full":
+                    all_users = self.get_all_local_users()
+                    active_users = all_users
+                    inactive_users = []
+                else:
+                    active_users, inactive_users = self.get_active_users(minutes=60)
                 
-                # === PUSH USER LÊN RENDER ===
-                self.log("\n📤 ĐẨY USER LÊN RENDER:", "INFO")
-                push_success = 0
-                for user in local_users:
-                    if self.push_user_to_render(
-                        user['user_id'], 
-                        user['balance'], 
-                        user['username']
-                    ):
-                        push_success += 1
-                    time.sleep(0.2)
+                # === XỬ LÝ USER ACTIVE ===
+                if active_users:
+                    self.log(f"\n⚡ XỬ LÝ {len(active_users)} USER ACTIVE:", "INFO")
+                    
+                    # Chia batch
+                    for i in range(0, len(active_users), self.batch_size):
+                        batch = active_users[i:i+self.batch_size]
+                        self.log(f"   Batch {i//self.batch_size + 1}: {len(batch)} users", "INFO")
+                        
+                        # Push song song
+                        push_ok = self.push_user_batch(batch)
+                        self.log(f"      Push: {push_ok}/{len(batch)}", "INFO")
+                        
+                        # Pull song song
+                        pull_ok = self.pull_user_batch(batch)
+                        self.log(f"      Pull: {pull_ok}/{len(batch)}", "INFO")
+                        
+                        time.sleep(self.batch_delay)
                 
-                # === PULL USER TỪ RENDER VỀ ===
-                self.log("\n📥 KÉO USER TỪ RENDER VỀ:", "INFO")
-                pull_success = 0
-                for user in local_users:
-                    if self.pull_user_from_render(user['user_id']):
-                        pull_success += 1
-                    time.sleep(0.2)
+                # === XỬ LÝ USER INACTIVE (CHỈ PULL) ===
+                if inactive_users and mode != "active":
+                    self.log(f"\n💤 XỬ LÝ {len(inactive_users)} USER INACTIVE:", "INFO")
+                    
+                    for i in range(0, len(inactive_users), self.batch_size * 2):
+                        batch = inactive_users[i:i+self.batch_size*2]
+                        pull_ok = self.pull_user_batch(batch)
+                        self.log(f"   Batch {i//(self.batch_size*2) + 1}: Pull {pull_ok}/{len(batch)}", "INFO")
+                        time.sleep(self.batch_delay)
                 
                 # === ĐỒNG BỘ TRANSACTIONS ===
-                transactions = self.get_pending_transactions()
+                transactions = self.get_pending_transactions(limit=50)
                 if transactions:
-                    trans_success = 0
+                    self.log(f"\n💳 ĐỒNG BỘ {len(transactions)} TRANSACTIONS:", "INFO")
                     for trans in transactions:
                         if self.push_transaction_to_render(trans):
-                            trans_success += 1
-                        time.sleep(0.2)
-                    self.log(f"\n✅ Đã đồng bộ {trans_success}/{len(transactions)} transaction", "SUCCESS")
+                            self.log(f"   ✅ {trans['code']}", "SUCCESS")
+                        time.sleep(0.1)
                 
                 # === THỐNG KÊ ===
-                self.log(f"\n📊 THỐNG KÊ CYCLE #{cycle_count}:", "INFO")
-                self.log(f"   • Push: {push_success}/{len(local_users)}", "INFO")
-                self.log(f"   • Pull: {pull_success}/{len(local_users)}", "INFO")
-                self.log(f"⏳ Chờ {interval}s...", "INFO")
+                elapsed = time.time() - start_cycle
+                self.log(f"\n📊 CYCLE #{cycle_count} HOÀN TẤT:", "INFO")
+                self.log(f"   • Thời gian: {elapsed:.1f}s", "INFO")
+                self.log(f"   • Push success: {self.stats['push_success']}", "SUCCESS")
+                self.log(f"   • Pull success: {self.stats['pull_success']}", "SUCCESS")
                 
-                # CHỜ
-                for i in range(interval):
+                # In stats định kỳ
+                if time.time() - last_stats_time > self.stats_interval:
+                    self.print_stats()
+                    last_stats_time = time.time()
+                
+                # === CHỜ ===
+                wait_time = max(1, interval - elapsed)
+                self.log(f"\n⏳ Chờ {wait_time:.1f}s...", "INFO")
+                
+                for i in range(int(wait_time)):
                     if not self.running:
                         break
                     time.sleep(1)
                 
             except KeyboardInterrupt:
                 self.log("\n👋 Đã dừng daemon", "INFO")
+                self.print_stats()
                 self.running = False
                 break
             except Exception as e:
                 self.log(f"❌ Lỗi daemon: {e}", "ERROR")
-                time.sleep(5)
+                import traceback
+                traceback.print_exc()
+                time.sleep(10)
     
     def stop(self):
         """Dừng daemon"""
         self.running = False
+        self.print_stats()
         self.log("🛑 Đã dừng daemon", "INFO")
 
 # ==================== MAIN ====================
@@ -587,73 +639,87 @@ if __name__ == "__main__":
     
     while True:
         print("\n" + "="*70)
-        print("🔄 CÔNG CỤ ĐỒNG BỘ 3 CHIỀU - RENDER = LOCAL = DAEMON")
+        print("🚀 DAEMON ĐỒNG BỘ 3 CHIỀU - PHIÊN BẢN SIÊU TỐI ƯU")
         print("="*70)
-        print("1. Đồng bộ TOÀN BỘ một lần (Push + Pull + Transactions)")
-        print("2. Chạy DAEMON tự động (mặc định 10 giây)")
-        print("3. Chạy DAEMON với thời gian tùy chỉnh")
-        print("4. Đẩy TẤT CẢ user lên Render")
-        print("5. Kéo TẤT CẢ user từ Render về")
-        print("6. Đồng bộ một user cụ thể")
-        print("7. Đồng bộ transactions")
-        print("8. Thử lại các push thất bại")
-        print("9. Xem danh sách push thất bại")
-        print("10. Thoát")
+        print("1. Đồng bộ TOÀN BỘ một lần")
+        print("2. Daemon TỰ ĐỘNG (thông minh - tự phân loại user)")
+        print("3. Daemon ACTIVE (chỉ user hoạt động)")
+        print("4. Daemon FULL (tất cả user)")
+        print("5. Daemon với thời gian tùy chỉnh")
+        print("6. Đẩy TẤT CẢ user lên Render")
+        print("7. Kéo TẤT CẢ user từ Render về")
+        print("8. Đồng bộ một user cụ thể")
+        print("9. Thử lại push thất bại")
+        print("10. Xem thống kê")
+        print("11. Cấu hình tham số")
+        print("12. Thoát")
         print("="*70)
         
-        choice = input("Chọn chức năng (1-10): ").strip()
+        choice = input("Chọn chức năng (1-12): ").strip()
         
         if choice == "1":
             daemon.full_sync()
         
         elif choice == "2":
-            daemon.run_daemon(10)
+            daemon.run_daemon_optimized(interval=60, mode="auto")
         
         elif choice == "3":
+            daemon.run_daemon_optimized(interval=30, mode="active")
+        
+        elif choice == "4":
+            daemon.run_daemon_optimized(interval=120, mode="full")
+        
+        elif choice == "5":
             try:
-                interval = int(input("Nhập thời gian giữa các lần đồng bộ (giây): "))
-                daemon.run_daemon(interval)
+                interval = int(input("Nhập thời gian (giây): "))
+                mode = input("Chọn mode (auto/active/full): ").strip() or "auto"
+                daemon.run_daemon_optimized(interval, mode)
             except ValueError:
                 print("❌ Vui lòng nhập số!")
         
-        elif choice == "4":
+        elif choice == "6":
             daemon.sync_all_users_push()
         
-        elif choice == "5":
+        elif choice == "7":
             daemon.sync_all_users_pull()
         
-        elif choice == "6":
+        elif choice == "8":
             try:
                 user_id = int(input("Nhập user_id: "))
                 daemon.sync_user(user_id)
             except ValueError:
                 print("❌ Vui lòng nhập số!")
         
-        elif choice == "7":
-            daemon.sync_all_transactions()
-        
-        elif choice == "8":
+        elif choice == "9":
             daemon.retry_failed_pushes()
         
-        elif choice == "9":
-            try:
-                if os.path.exists(daemon.failed_pushes_file):
-                    with open(daemon.failed_pushes_file, 'r') as f:
-                        failed = json.load(f)
-                    print(f"\n📋 Danh sách push thất bại ({len(failed)}):")
-                    for item in failed:
-                        print(f"   • User {item['user_id']}: {item['balance']}đ - {item.get('reason', 'N/A')}")
-                else:
-                    print("📭 Không có push thất bại nào!")
-            except Exception as e:
-                print(f"❌ Lỗi: {e}")
-        
         elif choice == "10":
+            daemon.print_stats()
+        
+        elif choice == "11":
+            print("\n⚙️ CẤU HÌNH HIỆN TẠI:")
+            print(f"   • Batch size: {daemon.batch_size}")
+            print(f"   • Workers: {daemon.max_workers}")
+            print(f"   • Push timeout: {daemon.push_timeout}s")
+            print(f"   • Pull timeout: {daemon.pull_timeout}s")
+            print(f"   • Retry limit: {daemon.retry_limit}")
+            
+            new_batch = input("\nBatch size mới (Enter để giữ): ").strip()
+            if new_batch:
+                daemon.batch_size = int(new_batch)
+            
+            new_workers = input("Số workers mới (Enter để giữ): ").strip()
+            if new_workers:
+                daemon.max_workers = int(new_workers)
+            
+            print("✅ Đã cập nhật cấu hình!")
+        
+        elif choice == "12":
             print("\n👋 Tạm biệt!")
             break
         
         else:
             print("❌ Lựa chọn không hợp lệ!")
         
-        if choice not in ["2", "3"]:
+        if choice not in ["2", "3", "4", "5"]:
             input("\nNhấn Enter để tiếp tục...")
