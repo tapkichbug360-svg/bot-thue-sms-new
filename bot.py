@@ -12,6 +12,7 @@ from telegram.request import HTTPXRequest
 from flask import Flask
 from database.models import db, User, Transaction, DepositTransaction, PushedTransaction
 from dotenv import load_dotenv
+from apscheduler.triggers.interval import IntervalTrigger
 
 # ==================== CẤU HÌNH LOGGING ====================
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -289,7 +290,12 @@ async def main():
         scheduler.add_job(cleanup_old_data, 'interval', hours=1)
         
         # Thêm job kiểm tra giao dịch mới (chạy mỗi 10 giây)
-        scheduler.add_job(check_new_transactions, 'interval', seconds=10)
+        scheduler.add_job(
+        check_new_transactions, 
+        trigger=IntervalTrigger(seconds=10, misfire_grace_time=30),  # THÊM Ở ĐÂY
+        id='check_new_transactions',  # THÊM ID ĐỂ DỄ QUẢN LÝ
+        misfire_grace_time=30  # HOẶC THÊM Ở ĐÂY 
+        )
         
         scheduler.start()
         logger.info("✅ Scheduler started (cleanup + check transactions)")

@@ -834,12 +834,14 @@ scheduler.add_job(
     replace_existing=True
 )
 
+# Dòng 676-687 - Sửa thành:
 scheduler.add_job(
     func=auto_check_new_transactions,
-    trigger=IntervalTrigger(seconds=10),
+    trigger=IntervalTrigger(seconds=10, misfire_grace_time=30),  # THÊM misfire_grace_time=30
     id='auto_check_new_transactions',
     name='Kiểm tra giao dịch mới',
-    replace_existing=True
+    replace_existing=True,
+    misfire_grace_time=30  # THÊM DÒNG NÀY (cách 2)
 )
 
 atexit.register(lambda: scheduler.shutdown())
