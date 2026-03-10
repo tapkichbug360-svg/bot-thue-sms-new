@@ -10,6 +10,7 @@ from collections import defaultdict
 import io
 import csv
 import asyncio
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +58,6 @@ def send_bulk_telegram(user_ids, message, from_user=None):
     
     for user_id in user_ids:
         try:
-            # Thêm thông tin người gửi nếu có
             full_message = message
             if from_user:
                 full_message += f"\n\n— Admin {from_user}"
@@ -67,7 +67,6 @@ def send_bulk_telegram(user_ids, message, from_user=None):
             else:
                 failed += 1
                 
-            # Delay nhỏ tránh spam
             time.sleep(0.05)
         except Exception as e:
             logger.error(f"Lỗi gửi cho user {user_id}: {e}")
@@ -144,6 +143,27 @@ BASE_TEMPLATE = '''
     </style>
 </head>
 <body>
+    <!-- THÊM SCRIPT NÀY NGAY SAU THẺ BODY -->
+<script>
+    function updateClock() {
+        const now = new Date();
+        const hours = now.getHours().toString().padStart(2, '0');
+        const minutes = now.getMinutes().toString().padStart(2, '0');
+        const seconds = now.getSeconds().toString().padStart(2, '0');  // THÊM GIÂY
+        const day = now.getDate().toString().padStart(2, '0');
+        const month = (now.getMonth() + 1).toString().padStart(2, '0');
+        const year = now.getFullYear();
+        
+        const clockElement = document.getElementById('liveClock');
+        if (clockElement) {
+            clockElement.innerHTML = `<i class="bi bi-clock-history me-1"></i>${hours}:${minutes}:${seconds} ${day}/${month}/${year}`;
+        }
+    }
+    
+    updateClock();
+    setInterval(updateClock, 1000);  // Cập nhật mỗi giây
+</script>
+    
     {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}
             {% for category, message in messages %}
@@ -168,7 +188,7 @@ BASE_TEMPLATE = '''
                     <li class="nav-item"><a class="nav-link px-4" href="/deduct"><i class="bi bi-dash-circle-fill text-warning"></i> Trừ tiền</a></li>
                     <li class="nav-item"><a class="nav-link px-4" href="/broadcast"><i class="bi bi-megaphone-fill text-info"></i> Gửi tin</a></li>
                     <li class="nav-item"><a class="nav-link px-4" href="/statistics"><i class="bi bi-bar-chart-line"></i> Thống kê</a></li>
-                    <li class="nav-item"><span class="nav-link text-white-50"><i class="bi bi-clock-history me-1"></i>{{ now.strftime('%H:%M %d/%m/%Y') }}</span></li>
+                    <li class="nav-item"><span class="nav-link text-white-50" id="liveClock"><i class="bi bi-clock-history me-1"></i>Đang tải...</span></li>
                 </ul>
             </div>
         </div>
@@ -184,7 +204,6 @@ BASE_TEMPLATE = '''
     <script src="https://cdn.datatables.net/1.13.7/js/dataTables.bootstrap5.min.js"></script>
     <script>
         $(document).ready(function() {
-            // Chỉ khởi tạo DataTable cho các bảng có class 'datatable'
             $('.datatable').DataTable({
                 language: { url: '//cdn.datatables.net/plug-ins/1.13.7/i18n/vi.json' },
                 pageLength: 15,
@@ -193,7 +212,6 @@ BASE_TEMPLATE = '''
             });
         });
         
-        // Hiển thị preview tin nhắn
         function updatePreview() {
             let message = document.getElementById('message').value;
             let preview = document.getElementById('messagePreview');
@@ -203,6 +221,93 @@ BASE_TEMPLATE = '''
                 preview.innerHTML = '<span class="text-muted">Nhập nội dung tin nhắn...</span>';
             }
         }
+
+        // Cập nhật đồng hồ mỗi giây
+        function updateClock() {
+            const now = new Date();
+            const hours = now.getHours().toString().padStart(2, '0');
+            const minutes = now.getMinutes().toString().padStart(2, '0');
+            const day = now.getDate().toString().padStart(2, '0');
+            const month = (now.getMonth() + 1).toString().padStart(2, '0');
+            const year = now.getFullYear();
+            
+            document.getElementById('liveClock').innerHTML = `<i class="bi bi-clock-history me-1"></i>${hours}:${minutes} ${day}/${month}/${year}`;
+        }
+        
+        updateClock();
+        setInterval(updateClock, 1000);
+        
+        // Tự động cập nhật dữ liệu mỗi 1 giây
+        function updateData() {
+            const path = window.location.pathname;
+            
+            if (path === '/users') {
+                updateUsersTable();
+            } else if (path.startsWith('/user/')) {
+                updateUserDetail();
+            }
+        }
+        
+        function updateUsersTable() {
+            fetch('/api/users/list')
+                .then(response => response.json())
+                .then(users => {
+                    const tbody = document.querySelector('#usersTable tbody');
+                    if (!tbody) return;
+                    
+                    let html = '';
+                    users.forEach(user => {
+                        html += `<tr>
+                            <td><input type="checkbox" class="user-checkbox" value="${user.user_id}"></td>
+                            <td>${user.id}</td>
+                            <td><code>${user.user_id}</code></td>
+                            <td>@${user.username || 'N/A'}</td>
+                            <td class="fw-bold text-success">${user.balance.toLocaleString()}đ</td>
+                            <td>${user.total_rentals}</td>
+                            <td>${user.total_spent.toLocaleString()}đ</td>
+                            <td class="text-success fw-bold">${user.profit.toLocaleString()}đ</td>
+                            <td>${user.created_at}</td>
+                            <td><span class="badge bg-${user.is_banned ? 'danger' : 'success'}">${user.is_banned ? 'Bị khóa' : 'Hoạt động'}</span></td>
+                            <td>
+                                <button class="btn btn-sm btn-primary" onclick="addMoney(${user.user_id})"><i class="bi bi-plus-circle"></i></button>
+                                <button class="btn btn-sm btn-warning" onclick="deductMoney(${user.user_id})"><i class="bi bi-dash-circle"></i></button>
+                                <button class="btn btn-sm btn-info text-white" onclick="sendMessage(${user.user_id})"><i class="bi bi-chat"></i></button>
+                                <button class="btn btn-sm btn-${user.is_banned ? 'success' : 'danger'}" onclick="toggleBan(${user.user_id})"><i class="bi bi-${user.is_banned ? 'unlock' : 'lock'}"></i></button>
+                                <a href="/user/${user.user_id}" class="btn btn-sm btn-info text-white"><i class="bi bi-eye-fill"></i></a>
+                            </td>
+                        </tr>`;
+                    });
+                    tbody.innerHTML = html;
+                });
+        }
+        
+        function updateUserDetail() {
+            const userId = window.location.pathname.split('/').pop();
+            fetch(`/api/user/${userId}`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) return;
+                    
+                    const rentalsTbody = document.querySelector('#rentalsTab tbody');
+                    if (rentalsTbody) {
+                        let html = '';
+                        data.rentals.forEach(r => {
+                            html += `<tr>
+                                <td>${r.created_at}</td>
+                                <td>${r.service_name}</td>
+                                <td><code>${r.phone_number || '—'}</code></td>
+                                <td class="fw-bold">${r.price_charged.toLocaleString()}đ</td>
+                                <td class="text-danger">${r.cost.toLocaleString()}đ</td>
+                                <td class="text-success fw-bold">${r.profit.toLocaleString()}đ</td>
+                                <td><span class="badge bg-${r.status === 'success' ? 'success' : r.status === 'waiting' ? 'warning' : 'danger'}">${r.status}</span></td>
+                            </tr>`;
+                        });
+                        rentalsTbody.innerHTML = html;
+                    }
+                });
+        }
+        
+        setInterval(updateData, 1000);
     </script>
 </body>
 </html>
@@ -515,7 +620,6 @@ function broadcastToAll() {
     new bootstrap.Modal(document.getElementById('sendMessageModal')).show();
 }
 
-// Xử lý form cộng tiền
 document.getElementById('addMoneyForm').addEventListener('submit', function(e) {
     e.preventDefault();
     fetch('/add_money', {
@@ -535,7 +639,6 @@ document.getElementById('addMoneyForm').addEventListener('submit', function(e) {
     });
 });
 
-// Xử lý form trừ tiền
 document.getElementById('deductMoneyForm').addEventListener('submit', function(e) {
     e.preventDefault();
     fetch('/deduct_money', {
@@ -555,7 +658,6 @@ document.getElementById('deductMoneyForm').addEventListener('submit', function(e
     });
 });
 
-// Xử lý form gửi tin nhắn
 document.getElementById('sendMessageForm').addEventListener('submit', function(e) {
     e.preventDefault();
     
@@ -768,7 +870,6 @@ BROADCAST_TEMPLATE = '''
                 </ul>
                 
                 <div class="tab-content">
-                    <!-- Tab Gửi 1 user -->
                     <div class="tab-pane fade show active" id="single">
                         <form method="POST" action="/send_message" onsubmit="return confirm('Gửi tin nhắn này?')">
                             <div class="mb-3">
@@ -785,7 +886,6 @@ BROADCAST_TEMPLATE = '''
                         </form>
                     </div>
                     
-                    <!-- Tab Gửi nhiều user -->
                     <div class="tab-pane fade" id="multiple">
                         <form method="POST" action="/send_message_bulk" onsubmit="return confirm('Gửi tin nhắn cho các user đã chọn?')">
                             <div class="mb-3">
@@ -802,7 +902,6 @@ BROADCAST_TEMPLATE = '''
                         </form>
                     </div>
                     
-                    <!-- Tab Gửi tất cả -->
                     <div class="tab-pane fade" id="all">
                         <form method="POST" action="/send_message_all" onsubmit="return confirm('⚠️ Bạn có chắc muốn gửi tin nhắn cho TẤT CẢ user?\nSố lượng: {{ total_users }} user')">
                             <div class="mb-3">
@@ -892,7 +991,6 @@ USER_DETAIL_TEMPLATE = '''
     </div>
     
     <div class="card-body">
-        <!-- Thông tin user -->
         <div class="row">
             <div class="col-md-4">
                 <div class="card h-100">
@@ -901,66 +999,37 @@ USER_DETAIL_TEMPLATE = '''
                     </div>
                     <div class="card-body">
                         <table class="table table-borderless">
-                            <tr>
-                                <th>Username:</th>
-                                <td>@{{ user.username or 'Chưa cập nhật' }}</td>
-                            </tr>
-                            <tr>
-                                <th>Số dư hiện tại:</th>
-                                <td><span class="text-success fw-bold fs-5">{{ "{:,.0f}".format(user.balance) }}đ</span></td>
-                            </tr>
-                            <tr>
-                                <th>Tổng số lần thuê:</th>
-                                <td>{{ user.total_rentals }}</td>
-                            </tr>
-                            <tr>
-                                <th>Tổng chi tiêu:</th>
-                                <td>{{ "{:,.0f}".format(user.total_spent) }}đ</td>
-                            </tr>
-                            <tr>
-                                <th>Lợi nhuận mang lại:</th>
-                                <td><span class="text-success fw-bold">{{ "{:,.0f}".format(user.profit) }}đ</span></td>
-                            </tr>
-                            <tr>
-                                <th>Trạng thái:</th>
-                                <td>
-                                    <span class="badge bg-{{ 'success' if not user.is_banned else 'danger' }}">
-                                        {{ 'Hoạt động' if not user.is_banned else 'Đã bị khóa' }}
-                                    </span>
-                                </td>
-                            </tr>
-                            <tr>
-                                <th>Ngày tham gia:</th>
-                                <td>{{ user.created_at.strftime('%d/%m/%Y %H:%M') }}</td>
-                            </tr>
+                            <tr><th>Username:</th><td>@{{ user.username or 'Chưa cập nhật' }}</td></tr>
+                            <tr><th>Số dư hiện tại:</th><td><span class="text-success fw-bold fs-5">{{ "{:,.0f}".format(user.balance) }}đ</span></td></tr>
+                            <tr><th>Tổng số lần thuê:</th><td>{{ user.total_rentals }}</td></tr>
+                            <tr><th>Tổng chi tiêu:</th><td>{{ "{:,.0f}".format(user.total_spent) }}đ</td></tr>
+                            <tr><th>Lợi nhuận mang lại:</th><td><span class="text-success fw-bold">{{ "{:,.0f}".format(user.profit) }}đ</span></td></tr>
+                            <tr><th>Trạng thái:</th><td><span class="badge bg-{{ 'success' if not user.is_banned else 'danger' }}">{{ 'Hoạt động' if not user.is_banned else 'Đã bị khóa' }}</span></td></tr>
+                            <tr><th>Ngày tham gia:</th><td>{{ user.created_at.strftime('%d/%m/%Y %H:%M') }}</td></tr>
                         </table>
                     </div>
                 </div>
             </div>
             
-            <!-- Chi tiết giao dịch -->
             <div class="col-md-8">
                 <ul class="nav nav-tabs" id="userTab" role="tablist">
                     <li class="nav-item">
                         <a class="nav-link active" data-bs-toggle="tab" href="#rentalsTab">
-                            <i class="bi bi-telephone"></i> Thuê số 
-                            <span class="badge bg-primary">{{ rentals|length }}</span>
+                            <i class="bi bi-telephone"></i> Thuê số <span class="badge bg-primary">{{ rentals|length }}</span>
                         </a>
                     </li>
                     <li class="nav-item">
                         <a class="nav-link" data-bs-toggle="tab" href="#transactionsTab">
-                            <i class="bi bi-cash-stack"></i> Giao dịch tiền
-                            <span class="badge bg-success">{{ transactions|length }}</span>
+                            <i class="bi bi-cash-stack"></i> Giao dịch tiền <span class="badge bg-success">{{ transactions|length }}</span>
                         </a>
                     </li>
                 </ul>
                 
                 <div class="tab-content mt-3">
-                    <!-- Tab Thuê số -->
                     <div class="tab-pane fade show active" id="rentalsTab">
                         {% if rentals %}
                         <div class="table-responsive">
-                            <table class="table table-striped table-hover datatable">
+                            <table class="table table-striped table-hover">
                                 <thead>
                                     <tr>
                                         <th>Thời gian</th>
@@ -972,50 +1041,19 @@ USER_DETAIL_TEMPLATE = '''
                                         <th>Trạng thái</th>
                                     </tr>
                                 </thead>
-                                <tbody>
+                                <tbody id="rentalsTableBody">
                                     {% for r in rentals %}
                                     <tr>
                                         <td>{{ r.created_at.strftime('%H:%M %d/%m/%Y') }}</td>
                                         <td>{{ r.service_name }}</td>
-                                        <td>
-                                            {% if r.phone_number %}
-                                                <code>{{ r.phone_number }}</code>
-                                            {% else %}
-                                                <span class="text-muted">—</span>
-                                            {% endif %}
-                                        </td>
+                                        <td><code>{{ r.phone_number or '—' }}</code></td>
                                         <td class="fw-bold">{{ "{:,.0f}".format(r.price_charged) }}đ</td>
                                         <td class="text-danger">{{ "{:,.0f}".format(r.cost or 0) }}đ</td>
-                                        <td class="text-success fw-bold">
-                                            {{ "{:,.0f}".format(r.price_charged - (r.cost or 0)) }}đ
-                                        </td>
-                                        <td>
-                                            {% if r.status == 'success' %}
-                                                <span class="badge bg-success">Thành công</span>
-                                            {% elif r.status == 'waiting' %}
-                                                <span class="badge bg-warning text-dark">Đang chờ</span>
-                                            {% elif r.status == 'cancelled' %}
-                                                <span class="badge bg-danger">Đã hủy</span>
-                                            {% elif r.status == 'expired' %}
-                                                <span class="badge bg-secondary">Hết hạn</span>
-                                            {% else %}
-                                                <span class="badge bg-secondary">{{ r.status }}</span>
-                                            {% endif %}
-                                        </td>
+                                        <td class="text-success fw-bold">{{ "{:,.0f}".format(r.price_charged - (r.cost or 0)) }}đ</td>
+                                        <td><span class="badge bg-{{ 'success' if r.status == 'success' else 'warning' if r.status == 'waiting' else 'danger' }}">{{ r.status }}</span></td>
                                     </tr>
                                     {% endfor %}
                                 </tbody>
-                                <tfoot>
-                                    <tr class="fw-bold">
-                                        <td colspan="3" class="text-end">Tổng cộng:</td>
-                                        <td>{{ "{:,.0f}".format(rentals|sum(attribute='price_charged')) }}đ</td>
-                                        <td>{{ "{:,.0f}".format(rentals|sum(attribute='cost') or 0) }}đ</td>
-                                        <td class="text-success">
-                                            {{ "{:,.0f}".format(rentals|sum(attribute='price_charged') - (rentals|sum(attribute='cost') or 0)) }}đ
-                                        </td>
-                                        <td></td>
-                                    </tr>
-                                </tfoot>
                             </table>
                         </div>
                         {% else %}
@@ -1027,66 +1065,34 @@ USER_DETAIL_TEMPLATE = '''
                         {% endif %}
                     </div>
                     
-                    <!-- Tab Giao dịch tiền -->
                     <div class="tab-pane fade" id="transactionsTab">
                         {% if transactions %}
                         <div class="table-responsive">
-                            <table class="table table-striped table-hover datatable">
+                            <table class="table table-striped table-hover">
                                 <thead>
                                     <tr>
                                         <th>Thời gian</th>
                                         <th>Loại</th>
                                         <th>Số tiền</th>
-                                        <th>Số dư sau GD</th>
                                         <th>Mã giao dịch</th>
-                                        <th>Ghi chú</th>
                                     </tr>
                                 </thead>
                                 <tbody>
                                     {% for t in transactions %}
                                     <tr>
                                         <td>{{ t.created_at.strftime('%H:%M %d/%m/%Y') }}</td>
-                                        <td>
-                                            {% if t.type == 'deposit' %}
-                                                <span class="badge bg-success">NẠP TIỀN</span>
-                                            {% elif t.type == 'deduct' %}
-                                                <span class="badge bg-warning text-dark">TRỪ TIỀN</span>
-                                            {% else %}
-                                                <span class="badge bg-secondary">{{ t.type }}</span>
-                                            {% endif %}
-                                        </td>
-                                        <td class="fw-bold {{ 'text-success' if t.type == 'deposit' else 'text-danger' }}">
-                                            {{ '+' if t.type == 'deposit' else '-' }}{{ "{:,.0f}".format(t.amount) }}đ
-                                        </td>
-                                        <td class="text-primary fw-bold">{{ "{:,.0f}".format(t.balance_after or 0) }}đ</td>
+                                        <td><span class="badge bg-success">NẠP TIỀN</span></td>
+                                        <td class="text-success fw-bold">+{{ "{:,.0f}".format(t.amount) }}đ</td>
                                         <td><code>{{ t.transaction_code }}</code></td>
-                                        <td>{{ t.description or '—' }}</td>
                                     </tr>
                                     {% endfor %}
                                 </tbody>
-                                <tfoot>
-                                    <tr class="fw-bold">
-                                        <td colspan="2" class="text-end">Tổng nạp:</td>
-                                        <td class="text-success">
-                                            +{{ "{:,.0f}".format(transactions|selectattr('type', 'equalto', 'deposit')|sum(attribute='amount')) }}đ
-                                        </td>
-                                        <td colspan="3"></td>
-                                    </tr>
-                                    <tr class="fw-bold">
-                                        <td colspan="2" class="text-end">Tổng trừ:</td>
-                                        <td class="text-danger">
-                                            -{{ "{:,.0f}".format(transactions|selectattr('type', 'equalto', 'deduct')|sum(attribute='amount')) }}đ
-                                        </td>
-                                        <td colspan="3"></td>
-                                    </tr>
-                                </tfoot>
                             </table>
                         </div>
                         {% else %}
                         <div class="text-center py-5">
                             <i class="bi bi-inbox fs-1 text-muted d-block mb-3"></i>
                             <h5 class="text-muted">Chưa có giao dịch tiền</h5>
-                            <p class="text-muted">User này chưa có giao dịch nạp/trừ tiền nào.</p>
                         </div>
                         {% endif %}
                     </div>
@@ -1101,9 +1107,7 @@ USER_DETAIL_TEMPLATE = '''
     <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
             <div class="modal-header bg-success text-white">
-                <h5 class="modal-title">
-                    <i class="bi bi-plus-circle-fill"></i> Cộng tiền cho user {{ user.user_id }}
-                </h5>
+                <h5 class="modal-title"><i class="bi bi-plus-circle-fill"></i> Cộng tiền cho user {{ user.user_id }}</h5>
                 <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
             </div>
             <form id="addMoneyForm" method="POST" action="/add_money">
@@ -1111,21 +1115,16 @@ USER_DETAIL_TEMPLATE = '''
                     <input type="hidden" name="user_id" value="{{ user.user_id }}">
                     <div class="mb-3">
                         <label class="form-label fw-bold">Số tiền (VNĐ)</label>
-                        <input type="number" class="form-control form-control-lg" name="amount" 
-                               min="1000" step="1000" required placeholder="Nhập số tiền">
-                        <div class="form-text">Số tiền phải từ 1,000đ trở lên</div>
+                        <input type="number" class="form-control form-control-lg" name="amount" min="1000" step="1000" required placeholder="Nhập số tiền">
                     </div>
                     <div class="mb-3">
                         <label class="form-label fw-bold">Lý do</label>
-                        <input type="text" class="form-control" name="reason" 
-                               value="Cộng tiền thủ công" placeholder="Nhập lý do">
+                        <input type="text" class="form-control" name="reason" value="Cộng tiền thủ công">
                     </div>
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Hủy</button>
-                    <button type="submit" class="btn btn-success">
-                        <i class="bi bi-check-circle"></i> Xác nhận cộng tiền
-                    </button>
+                    <button type="submit" class="btn btn-success">Xác nhận cộng tiền</button>
                 </div>
             </form>
         </div>
@@ -1137,9 +1136,7 @@ USER_DETAIL_TEMPLATE = '''
     <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
             <div class="modal-header bg-warning">
-                <h5 class="modal-title">
-                    <i class="bi bi-dash-circle-fill"></i> Trừ tiền user {{ user.user_id }}
-                </h5>
+                <h5 class="modal-title"><i class="bi bi-dash-circle-fill"></i> Trừ tiền user {{ user.user_id }}</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <form id="deductMoneyForm" method="POST" action="/deduct_money">
@@ -1147,21 +1144,16 @@ USER_DETAIL_TEMPLATE = '''
                     <input type="hidden" name="user_id" value="{{ user.user_id }}">
                     <div class="mb-3">
                         <label class="form-label fw-bold">Số tiền (VNĐ)</label>
-                        <input type="number" class="form-control form-control-lg" name="amount" 
-                               min="1000" step="1000" required placeholder="Nhập số tiền">
-                        <div class="form-text">Số dư hiện tại: {{ "{:,.0f}".format(user.balance) }}đ</div>
+                        <input type="number" class="form-control form-control-lg" name="amount" min="1000" step="1000" required placeholder="Nhập số tiền">
                     </div>
                     <div class="mb-3">
                         <label class="form-label fw-bold">Lý do</label>
-                        <input type="text" class="form-control" name="reason" 
-                               value="Trừ tiền thủ công" placeholder="Nhập lý do">
+                        <input type="text" class="form-control" name="reason" value="Trừ tiền thủ công">
                     </div>
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Hủy</button>
-                    <button type="submit" class="btn btn-warning">
-                        <i class="bi bi-check-circle"></i> Xác nhận trừ tiền
-                    </button>
+                    <button type="submit" class="btn btn-warning">Xác nhận trừ tiền</button>
                 </div>
             </form>
         </div>
@@ -1173,9 +1165,7 @@ USER_DETAIL_TEMPLATE = '''
     <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
             <div class="modal-header bg-info text-white">
-                <h5 class="modal-title">
-                    <i class="bi bi-chat-dots-fill"></i> Gửi tin nhắn cho user {{ user.user_id }}
-                </h5>
+                <h5 class="modal-title"><i class="bi bi-chat-dots-fill"></i> Gửi tin nhắn cho user {{ user.user_id }}</h5>
                 <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
             </div>
             <form id="sendMessageForm">
@@ -1184,14 +1174,11 @@ USER_DETAIL_TEMPLATE = '''
                     <div class="mb-3">
                         <label class="form-label fw-bold">Nội dung tin nhắn</label>
                         <textarea class="form-control" name="message" rows="5" required placeholder="Nhập nội dung..."></textarea>
-                        <div class="form-text">Hỗ trợ Markdown: *in đậm*, `mã`, [link](url)</div>
                     </div>
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Hủy</button>
-                    <button type="submit" class="btn btn-info text-white">
-                        <i class="bi bi-send"></i> Gửi tin nhắn
-                    </button>
+                    <button type="submit" class="btn btn-info text-white">Gửi tin nhắn</button>
                 </div>
             </form>
         </div>
@@ -1199,83 +1186,104 @@ USER_DETAIL_TEMPLATE = '''
 </div>
 
 <script>
-function addMoney(userId) { 
-    new bootstrap.Modal(document.getElementById('addMoneyModal')).show(); 
-}
+function addMoney(userId) { new bootstrap.Modal(document.getElementById('addMoneyModal')).show(); }
+function deductMoney(userId) { new bootstrap.Modal(document.getElementById('deductMoneyModal')).show(); }
+function sendMessage(userId) { new bootstrap.Modal(document.getElementById('sendMessageModal')).show(); }
 
-function deductMoney(userId) { 
-    new bootstrap.Modal(document.getElementById('deductMoneyModal')).show(); 
-}
-
-function sendMessage(userId) {
-    new bootstrap.Modal(document.getElementById('sendMessageModal')).show();
-}
-
-// Xử lý form cộng tiền
 document.getElementById('addMoneyForm')?.addEventListener('submit', function(e) {
     e.preventDefault();
     fetch('/add_money', {
         method: 'POST',
         body: new URLSearchParams(new FormData(this))
-    })
-    .then(response => response.json())
-    .then(data => {
-        if (data.success) {
-            location.reload();
-        } else {
-            alert('Lỗi: ' + data.error);
-        }
-    })
-    .catch(error => {
-        alert('Lỗi kết nối: ' + error);
+    }).then(response => response.json()).then(data => {
+        if (data.success) location.reload();
+        else alert('Lỗi: ' + data.error);
     });
 });
 
-// Xử lý form trừ tiền
 document.getElementById('deductMoneyForm')?.addEventListener('submit', function(e) {
     e.preventDefault();
     fetch('/deduct_money', {
         method: 'POST',
         body: new URLSearchParams(new FormData(this))
-    })
-    .then(response => response.json())
-    .then(data => {
-        if (data.success) {
-            location.reload();
-        } else {
-            alert('Lỗi: ' + data.error);
-        }
-    })
-    .catch(error => {
-        alert('Lỗi kết nối: ' + error);
+    }).then(response => response.json()).then(data => {
+        if (data.success) location.reload();
+        else alert('Lỗi: ' + data.error);
     });
 });
 
-// Xử lý form gửi tin nhắn
 document.getElementById('sendMessageForm')?.addEventListener('submit', function(e) {
     e.preventDefault();
     fetch('/send_message', {
         method: 'POST',
         body: new URLSearchParams(new FormData(this))
-    })
-    .then(response => response.json())
-    .then(data => {
+    }).then(response => response.json()).then(data => {
         if (data.success) {
             alert('✅ Đã gửi tin nhắn thành công!');
             bootstrap.Modal.getInstance(document.getElementById('sendMessageModal')).hide();
-        } else {
-            alert('Lỗi: ' + data.error);
-        }
-    })
-    .catch(error => {
-        alert('Lỗi kết nối: ' + error);
+        } else alert('Lỗi: ' + data.error);
     });
 });
 </script>
 '''
 
-# ====================== ROUTES ======================
+# ====================== API ROUTES ======================
+@app.route('/api/stats')
+def api_stats():
+    """API trả về thống kê"""
+    with app.app_context():
+        total_users = User.query.count()
+        return jsonify({'total_users': total_users})
 
+@app.route('/api/users/list')
+def api_users_list():
+    """API trả về danh sách users"""
+    with app.app_context():
+        users = User.query.order_by(User.created_at.desc()).all()
+        users_data = []
+        for u in users:
+            rentals = Rental.query.filter_by(user_id=u.id, status='success').all()
+            profit = sum(r.price_charged - (r.cost or 0) for r in rentals)
+            users_data.append({
+                'id': u.id,
+                'user_id': u.user_id,
+                'username': u.username or '',
+                'balance': u.balance,
+                'total_rentals': u.total_rentals,
+                'total_spent': u.total_spent,
+                'profit': profit,
+                'created_at': u.created_at.strftime('%d/%m/%Y %H:%M'),
+                'is_banned': u.is_banned
+            })
+        return jsonify(users_data)
+
+@app.route('/api/user/<int:user_id>')
+def api_user_detail(user_id):
+    """API trả về chi tiết user"""
+    with app.app_context():
+        user = User.query.filter_by(user_id=user_id).first()
+        if not user:
+            return jsonify({'error': 'Not found'}), 404
+        
+        rentals = Rental.query.filter_by(user_id=user.id).order_by(Rental.created_at.desc()).all()
+        if not rentals:
+            rentals = Rental.query.filter_by(user_id=user_id).order_by(Rental.created_at.desc()).all()
+        
+        rentals_data = []
+        for r in rentals:
+            rentals_data.append({
+                'created_at': r.created_at.strftime('%H:%M %d/%m/%Y'),
+                'service_name': r.service_name,
+                'phone_number': r.phone_number,
+                'price_charged': r.price_charged,
+                'cost': r.cost or 0,
+                'profit': r.price_charged - (r.cost or 0),
+                'status': r.status
+            })
+        
+        return jsonify({'rentals': rentals_data})
+
+# ====================== ROUTES ======================
 @app.route('/')
 def index():
     now = datetime.now()
@@ -1296,23 +1304,25 @@ def index():
         
         for item in all_items[:10]:
             if hasattr(item, 'type') and item.type == 'deposit':
+                user = User.query.get(item.user_id)
                 recent.append({
                     'time': item.created_at.strftime('%H:%M %d/%m'),
-                    'user_id': item.user_id,
+                    'user_id': user.user_id if user else item.user_id,
                     'type': 'Nạp tiền',
                     'service': None,
                     'amount': item.amount,
                     'profit': 0
                 })
-            else:
-                p = item.price_charged - (item.cost or (item.price_charged - 1000))
+            elif hasattr(item, 'service_name'):
+                user = User.query.get(item.user_id)
+                profit = item.price_charged - (item.cost or 0)
                 recent.append({
                     'time': item.created_at.strftime('%H:%M %d/%m'),
-                    'user_id': item.user_id,
+                    'user_id': user.user_id if user else item.user_id,
                     'type': 'Thuê số',
                     'service': item.service_name,
                     'amount': item.price_charged,
-                    'profit': p
+                    'profit': profit
                 })
         
         stats = {
@@ -1341,7 +1351,7 @@ def users():
         users_with_profit = []
         for u in users_list:
             user_rentals = Rental.query.filter_by(user_id=u.id, status='success').all()
-            profit = sum(r.price_charged - (r.cost or (r.price_charged - 1000)) for r in user_rentals)
+            profit = sum(r.price_charged - (r.cost or 0) for r in user_rentals)
             users_with_profit.append({
                 'id': u.id,
                 'user_id': u.user_id,
@@ -1364,23 +1374,22 @@ def user_detail(user_id):
     with app.app_context():
         user = User.query.filter_by(user_id=user_id).first_or_404()
         rentals = Rental.query.filter_by(user_id=user.id).order_by(Rental.created_at.desc()).all()
+        if not rentals:
+            rentals = Rental.query.filter_by(user_id=user_id).order_by(Rental.created_at.desc()).all()
         transactions = Transaction.query.filter_by(user_id=user.id).order_by(Transaction.created_at.desc()).all()
         
-        # ===== LOG DEBUG =====
-        print(f"\n🔍 USER DETAIL - Telegram ID: {user_id}")
-        print(f"  - DB User ID: {user.id}")
-        print(f"  - Username: {user.username}")
-        print(f"  - Số rentals trong DB: {len(rentals)}")
-        print(f"  - Số transactions trong DB: {len(transactions)}")
-        
         profit = sum(r.price_charged - (r.cost or 0) for r in rentals if r.status == 'success')
+        
+        print(f"\n🔍 USER DETAIL: {user_id}")
+        print(f"  - DB ID: {user.id}")
+        print(f"  - Rentals found: {len(rentals)}")
         
         user_data = {
             'user_id': user.user_id,
             'username': user.username,
             'balance': user.balance,
-            'total_rentals': user.total_rentals,
-            'total_spent': user.total_spent,
+            'total_rentals': len(rentals),
+            'total_spent': sum(r.price_charged for r in rentals if r.status == 'success'),
             'is_banned': user.is_banned,
             'profit': profit,
             'created_at': user.created_at
@@ -1619,7 +1628,6 @@ def manual():
 def broadcast():
     with app.app_context():
         total_users = User.query.count()
-        # Lấy lịch sử gửi tin từ database (nếu có)
         broadcast_logs = []
     
     return render_template_string(
@@ -1663,6 +1671,23 @@ def add_money():
         db.session.add(transaction)
         db.session.commit()
         
+        # ===== QUAN TRỌNG: PUSH LÊN RENDER NGAY =====
+        try:
+            push_data = {
+                'user_id': user.user_id,
+                'balance': user.balance,
+                'username': user.username or f"user_{user.user_id}"
+            }
+            # Gửi lên Render
+            requests.post(
+                f"{os.getenv('RENDER_URL', 'https://bot-thue-sms-new.onrender.com')}/api/update-balance",
+                json=push_data,
+                timeout=5
+            )
+            logger.info(f"✅ Đã push balance {user.balance}đ lên Render cho user {user_id}")
+        except Exception as e:
+            logger.error(f"❌ Lỗi push lên Render: {e}")
+        
         # Gửi thông báo Telegram
         message = (
             f"💰 *NẠP TIỀN THÀNH CÔNG!*\n\n"
@@ -1674,11 +1699,7 @@ def add_money():
         )
         send_telegram_notification(user.user_id, message)
         
-        return jsonify({
-            'success': True,
-            'message': f'Đã cộng {amount:,}đ cho user {user_id}',
-            'new_balance': user.balance
-        })
+        return jsonify({'success': True, 'new_balance': user.balance})
 
 @app.route('/deduct_money', methods=['POST'])
 def deduct_money():
@@ -1715,6 +1736,23 @@ def deduct_money():
         db.session.add(transaction)
         db.session.commit()
         
+        # ===== QUAN TRỌNG: PUSH LÊN RENDER NGAY =====
+        try:
+            push_data = {
+                'user_id': user.user_id,
+                'balance': user.balance,
+                'username': user.username or f"user_{user.user_id}"
+            }
+            # Gửi lên Render
+            requests.post(
+                f"{os.getenv('RENDER_URL', 'https://bot-thue-sms-new.onrender.com')}/api/update-balance",
+                json=push_data,
+                timeout=5
+            )
+            logger.info(f"✅ Đã push balance {user.balance}đ lên Render cho user {user_id}")
+        except Exception as e:
+            logger.error(f"❌ Lỗi push lên Render: {e}")
+        
         # Gửi thông báo Telegram
         message = (
             f"💸 *TRỪ TIỀN THỦ CÔNG*\n\n"
@@ -1726,15 +1764,10 @@ def deduct_money():
         )
         send_telegram_notification(user.user_id, message)
         
-        return jsonify({
-            'success': True,
-            'message': f'Đã trừ {amount:,}đ cho user {user_id}',
-            'new_balance': user.balance
-        })
+        return jsonify({'success': True, 'new_balance': user.balance})
 
 @app.route('/send_message', methods=['POST'])
 def send_message():
-    """Gửi tin nhắn đến 1 user cụ thể"""
     user_id = request.form.get('user_id', type=int)
     message = request.form.get('message', '').strip()
     
@@ -1742,15 +1775,10 @@ def send_message():
         return jsonify({'success': False, 'error': 'Thiếu thông tin'})
     
     success = send_telegram_notification(user_id, message)
-    
-    if success:
-        return jsonify({'success': True, 'message': 'Đã gửi tin nhắn thành công'})
-    else:
-        return jsonify({'success': False, 'error': 'Không thể gửi tin nhắn'})
+    return jsonify({'success': success})
 
 @app.route('/send_message_bulk', methods=['POST'])
 def send_message_bulk():
-    """Gửi tin nhắn đến nhiều user"""
     user_ids_text = request.form.get('user_ids', '')
     message = request.form.get('message', '').strip()
     
@@ -1758,38 +1786,23 @@ def send_message_bulk():
         flash('Thiếu thông tin!', 'danger')
         return redirect(url_for('broadcast'))
     
-    # Parse danh sách user_id
-    user_ids = []
-    for line in user_ids_text.split('\n'):
-        line = line.strip()
-        if line and line.isdigit():
-            user_ids.append(int(line))
-    
-    if not user_ids:
-        flash('Không có user ID hợp lệ!', 'danger')
-        return redirect(url_for('broadcast'))
-    
-    success_count, failed_count = send_bulk_telegram(user_ids, message)
-    
-    flash(f'✅ Gửi tin nhắn hàng loạt:\n• Thành công: {success_count}\n• Thất bại: {failed_count}', 'success')
+    user_ids = [int(line.strip()) for line in user_ids_text.split('\n') if line.strip().isdigit()]
+    success, failed = send_bulk_telegram(user_ids, message)
+    flash(f'✅ Gửi tin nhắn: {success} thành công, {failed} thất bại', 'success')
     return redirect(url_for('broadcast'))
 
 @app.route('/send_message_all', methods=['POST'])
 def send_message_all():
-    """Gửi tin nhắn đến tất cả user"""
     message = request.form.get('message', '').strip()
-    
     if not message:
         flash('Thiếu nội dung tin nhắn!', 'danger')
         return redirect(url_for('broadcast'))
     
     with app.app_context():
-        users = User.query.all()
-        user_ids = [u.user_id for u in users]
+        user_ids = [u.user_id for u in User.query.all()]
     
-    success_count, failed_count = send_bulk_telegram(user_ids, message)
-    
-    flash(f'✅ Gửi tin nhắn cho TẤT CẢ user:\n• Thành công: {success_count}/{len(user_ids)}\n• Thất bại: {failed_count}', 'success')
+    success, failed = send_bulk_telegram(user_ids, message)
+    flash(f'✅ Gửi tin nhắn cho TẤT CẢ user: {success} thành công, {failed} thất bại', 'success')
     return redirect(url_for('broadcast'))
 
 @app.route('/toggle_ban', methods=['POST'])
@@ -1802,12 +1815,8 @@ def toggle_ban():
         if user:
             user.is_banned = not user.is_banned
             db.session.commit()
-            
-            # Gửi thông báo
             status = "bị khóa" if user.is_banned else "được mở khóa"
-            message = f"🔒 *Tài khoản của bạn đã {status}* bởi Admin."
-            send_telegram_notification(user.user_id, message)
-            
+            send_telegram_notification(user.user_id, f"🔒 *Tài khoản của bạn đã {status}* bởi Admin.")
             return jsonify({'success': True})
     return jsonify({'success': False})
 
@@ -1820,9 +1829,8 @@ def export_users():
         writer.writerow(['ID', 'User ID', 'Username', 'Số dư', 'Đã thuê', 'Tổng chi', 'Lợi nhuận', 'Ngày tạo', 'Trạng thái'])
         
         for u in users:
-            user_rentals = Rental.query.filter_by(user_id=u.id, status='success').all()
-            profit = sum(r.price_charged - (r.cost or 0) for r in user_rentals)
-            
+            rentals = Rental.query.filter_by(user_id=u.id, status='success').all()
+            profit = sum(r.price_charged - (r.cost or 0) for r in rentals)
             writer.writerow([
                 u.id, u.user_id, u.username or '', 
                 u.balance, u.total_rentals, u.total_spent, profit,
