@@ -297,9 +297,11 @@ def setup_sepay_webhook(app):
             transaction_id = data.get('transactionId', '')
             
             if transfer_type != 'in':
+                logger.info(f"⏭️ Bỏ qua giao dịch {transfer_type} (không phải tiền vào)")
                 return jsonify({"success": True}), 200
             
             if account_number != MB_ACCOUNT:
+                logger.info(f"⏭️ Bỏ qua giao dịch tài khoản {account_number} (không phải MB {MB_ACCOUNT})")
                 return jsonify({"success": True}), 200
             
             # Tìm mã GD
@@ -324,6 +326,11 @@ def setup_sepay_webhook(app):
                 transaction = Transaction.query.filter_by(
                     transaction_code=transaction_code
                 ).first()
+                
+                if transaction:
+                    logger.info(f"📝 ĐÃ TÌM THẤY TRANSACTION CŨ: ID={transaction.id}, amount={transaction.amount}")
+                else:
+                    logger.info(f"📝 CHƯA CÓ TRANSACTION NÀY, sẽ tạo mới")
                 
                 # ===== XÁC ĐỊNH USER =====
                 target_user = None
@@ -373,7 +380,10 @@ def setup_sepay_webhook(app):
                         "error": "User not found"
                     }), 404
                 
-                # ===== XỬ LÝ GIAO DỊCH - ĐÃ SỬA LỖI =====
+                logger.info(f"👤 USER: {target_user.user_id}, Username: {target_user.username}")
+                logger.info(f"💰 BALANCE HIỆN TẠI TRONG DB: {target_user.balance}")
+                
+                # ===== XỬ LÝ GIAO DỊCH =====
                 old_balance = target_user.balance
                 
                 if not transaction:
@@ -400,12 +410,16 @@ def setup_sepay_webhook(app):
                 else:
                     # Giao dịch đã tồn tại - CỘNG THÊM TIỀN
                     logger.info(f"🔄 Giao dịch {transaction_code} đã tồn tại, cộng thêm {amount}đ cho user {target_user.user_id}")
-                    logger.info(f"💰 BALANCE TRƯỚC KHI CỘNG: {target_user.balance}")
+                    logger.info(f"💰 BALANCE TRƯỚC KHI CỘNG (từ DB): {target_user.balance}")
+                    logger.info(f"💰 TRANSACTION CŨ có amount={transaction.amount}")
                     
                     # Cập nhật transaction
+                    old_trans_amount = transaction.amount
                     transaction.amount += amount
                     transaction.status = 'success'
                     transaction.updated_at = current_time
+                    
+                    logger.info(f"📝 TRANSACTION amount cũ: {old_trans_amount} → mới: {transaction.amount}")
                     
                     # CỘNG TIỀN CHO USER
                     target_user.balance += amount
@@ -417,9 +431,20 @@ def setup_sepay_webhook(app):
                 # COMMIT VÀO DATABASE
                 try:
                     db.session.commit()
-                    logger.info(f"✅ COMMIT THÀNH CÔNG! Balance mới: {target_user.balance}")
+                    logger.info(f"✅ COMMIT THÀNH CÔNG! Balance trong DB sau commit: {target_user.balance}")
+                    
+                    # KIỂM TRA LẠI TỪ DB
+                    db.session.refresh(target_user)
+                    logger.info(f"🔍 KIỂM TRA LẠI TỪ DB SAU REFRESH: {target_user.balance}")
+                    
+                    # KIỂM TRA TRANSACTION
+                    trans_check = Transaction.query.get(transaction.id)
+                    logger.info(f"🔍 TRANSACTION TRONG DB: amount={trans_check.amount}")
+                    
                 except Exception as e:
                     logger.error(f"❌ COMMIT THẤT BẠI: {e}")
+                    import traceback
+                    traceback.print_exc()
                     db.session.rollback()
                     return jsonify({"success": False, "error": "Commit failed"}), 500
 
