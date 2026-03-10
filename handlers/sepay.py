@@ -1,7 +1,4 @@
-﻿# ===== webhook.py - CẬP NHẬT =====
-# GIỮ NGUYÊN CẤU TRÚC CODE GỐC, CHỈ THÊM TÍNH NĂNG ĐỒNG BỘ
-
-from flask import request, jsonify
+﻿from flask import request, jsonify
 import logging
 from bot import app
 from database.models import User, Transaction, db
@@ -35,7 +32,7 @@ last_sync_time = datetime.now()
 
 # ===== HÀM GỬI TELEGRAM ĐỒNG BỘ =====
 def send_telegram_sync(chat_id, message):
-    """Gửi Telegram đồng bộ - GIỮ NGUYÊN CODE GỐC"""
+    """Gửi Telegram đồng bộ"""
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
         payload = {
@@ -184,13 +181,16 @@ def receive_sync():
             amount = data.get('amount')
             tx_code = data.get('transaction_code')
             
-            logger.info(f"📥 Nhận đồng bộ từ Local: Cộng/trừ {amount}đ cho user {user_id}")
+            logger.info(f"📥 Nhận đồng bộ từ Local: {'Cộng' if amount > 0 else 'Trừ'} {abs(amount)}đ cho user {user_id}")
             
             # Cập nhật vào database của bot
             with app.app_context():
                 user = User.query.filter_by(user_id=user_id).first()
                 if user:
                     old_balance = user.balance
+                    
+                    # Cập nhật balance
+                    user.balance += amount
                     
                     # Tạo transaction
                     transaction = Transaction(
@@ -279,7 +279,7 @@ def sync_bidirectional():
         logger.error(f"❌ Lỗi sync_bidirectional: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
-# ===== WEBHOOK CHÍNH - GIỮ NGUYÊN CODE GỐC, CHỈ THÊM ĐỒNG BỘ =====
+# ===== WEBHOOK CHÍNH - ĐÃ SỬA LỖI =====
 def setup_sepay_webhook(app):
     @app.route('/webhook/sepay', methods=['POST'])
     def sepay_webhook():
@@ -373,8 +373,11 @@ def setup_sepay_webhook(app):
                         "error": "User not found"
                     }), 404
                 
-                # Xử lý giao dịch
+                # ===== XỬ LÝ GIAO DỊCH - ĐÃ SỬA LỖI =====
+                old_balance = target_user.balance
+                
                 if not transaction:
+                    # Tạo giao dịch mới
                     transaction = Transaction(
                         user_id=target_user.id,
                         amount=amount,
@@ -386,18 +389,22 @@ def setup_sepay_webhook(app):
                         updated_at=current_time
                     )
                     db.session.add(transaction)
+                    # CỘNG TIỀN CHO USER (giao dịch mới)
+                    target_user.balance += amount
                     logger.info(f"✅ TẠO GIAO DỊCH MỚI CHO USER {target_user.user_id}: {transaction_code}")
                 else:
+                    # Giao dịch đã tồn tại - CỘNG THÊM TIỀN
                     logger.info(f"🔄 Giao dịch {transaction_code} đã tồn tại, cộng thêm {amount}đ cho user {target_user.user_id}")
                     transaction.amount += amount
                     transaction.status = 'success'
                     transaction.updated_at = current_time
+                    # ===== QUAN TRỌNG: CỘNG TIỀN CHO USER =====
+                    target_user.balance += amount  # <<< DÒNG NÀY ĐÃ ĐƯỢC THÊM VÀO
                 
-                # CỘNG TIỀN
-                old_balance = target_user.balance
-                target_user.balance += amount
+                # Cập nhật thời gian hoạt động
                 target_user.last_active = current_time
 
+                # COMMIT VÀO DATABASE
                 db.session.commit()
 
                 logger.info(f"✅ CẬP NHẬT THÀNH CÔNG CHO USER {target_user.user_id}!")
@@ -414,7 +421,7 @@ def setup_sepay_webhook(app):
                         f"• **Thời gian:** {current_time_str}"
                     )
                     
-                    # Gửi Telegram đồng bộ
+                    # Gửi Telegram
                     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
                     payload = {
                         'chat_id': target_user.user_id,
@@ -431,7 +438,7 @@ def setup_sepay_webhook(app):
                 except Exception as e:
                     logger.error(f"❌ Lỗi gửi Telegram: {e}")
                 
-                # ===== ĐỒNG BỘ 2 CHIỀU (THÊM MỚI) =====
+                # ===== ĐỒNG BỘ 2 CHIỀU =====
                 try:
                     # Chuẩn bị dữ liệu user để đồng bộ
                     user_data = {
@@ -476,7 +483,7 @@ def setup_sepay_webhook(app):
             traceback.print_exc()
             return jsonify({"success": False}), 500
 
-    # ===== THÊM API ĐỒNG BỘ ĐỊNH KỲ =====
+    # ===== API ĐỒNG BỘ ĐỊNH KỲ =====
     @app.route('/api/force-sync', methods=['POST'])
     def force_sync():
         """API để đồng bộ cưỡng chế tất cả dữ liệu"""
