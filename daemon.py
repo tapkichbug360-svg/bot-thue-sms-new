@@ -74,6 +74,20 @@ class UserSyncDaemon:
                 self.stats[key] += value
             else:
                 self.stats[key] = value
+    def get_render_balance(self, user_id):
+        """Lấy balance hiện tại từ Render - tránh push trùng"""
+        try:
+            response = requests.post(
+                f"{RENDER_URL}/api/check-user",
+                json={'user_id': user_id},
+                timeout=3
+            )
+            if response.status_code == 200:
+                data = response.json()
+                return data.get('balance')
+        except Exception as e:
+            self.log(f"⚠️ Lỗi lấy balance từ Render: {e}", "WARNING")
+        return None
     
     def print_stats(self):
         """In thống kê hiệu suất"""
@@ -273,7 +287,21 @@ class UserSyncDaemon:
     
     # ==================== ĐẨY DỮ LIỆU LÊN RENDER ====================
     def push_user_to_render(self, user_id, balance, username, reason=""):
-        """Đẩy user lên Render - CÓ ĐO THỜI GIAN"""
+        """Đẩy user lên Render - KHÔNG PUSH KHI BALANCE = 0"""
+        
+        # ===== QUAN TRỌNG: KHÔNG PUSH NẾU BALANCE = 0 =====
+        if balance == 0:
+            self.log(f"⏭️ User {user_id}: Balance = 0, bỏ qua push để tránh reset", "INFO")
+            self.update_stats('push_success')  # Vẫn tính là thành công
+            return True
+        
+        # KIỂM TRA BALANCE HIỆN TẠI TRÊN RENDER
+        render_balance = self.get_render_balance(user_id)
+        if render_balance is not None and render_balance == balance:
+            self.log(f"⏭️ User {user_id}: Balance đã đồng bộ ({balance}đ), bỏ qua push", "INFO")
+            self.update_stats('push_success')
+            return True
+        
         start_time = time.time()
         
         for attempt in range(self.retry_limit):
@@ -293,6 +321,7 @@ class UserSyncDaemon:
                 
                 if response.status_code == 200:
                     self.update_stats('push_success')
+                    self.log(f"✅ Push user {user_id}: {balance}đ thành công", "SUCCESS")
                     return True
                 else:
                     self.log(f"⚠️ Push user {user_id} lỗi {response.status_code}", "WARNING")
@@ -307,14 +336,24 @@ class UserSyncDaemon:
         return False
     
     def push_user_batch(self, users):
-        """Đẩy nhiều user song song"""
+        """Đẩy nhiều user song song - LỌC USER CÓ BALANCE > 0"""
         if not users:
+            return 0
+        
+        # CHỈ PUSH USER CÓ BALANCE > 0
+        valid_users = [u for u in users if u['balance'] > 0]
+        skipped = len(users) - len(valid_users)
+        
+        if skipped > 0:
+            self.log(f"⏭️ Bỏ qua {skipped} user có balance = 0", "INFO")
+        
+        if not valid_users:
             return 0
             
         success = 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = []
-            for user in users:
+            for user in valid_users:
                 future = executor.submit(
                     self.push_user_to_render,
                     user['user_id'],
@@ -328,79 +367,80 @@ class UserSyncDaemon:
                     success += 1
         
         return success
+    def fix_reset_user(self, user_id, correct_balance, correct_username):
+        """Fix user bị reset - Đặt lại balance đúng"""
+        self.log(f"🔄 Fix user {user_id}: Đặt lại balance = {correct_balance}đ", "INFO")
+        
+        # Push balance đúng lên Render
+        response = requests.post(
+            f"{RENDER_URL}/api/sync-bidirectional",
+            json={
+                'user_id': user_id,
+                'balance': correct_balance,
+                'username': correct_username
+            },
+            timeout=5
+        )
+        
+        if response.status_code == 200:
+            self.log(f"✅ Fix user {user_id} thành công", "SUCCESS")
+            return True
+        else:
+            self.log(f"❌ Fix user {user_id} thất bại", "ERROR")
+            return False
     
     # ==================== KÉO DỮ LIỆU TỪ RENDER VỀ ====================
     def pull_user_from_render(self, user_id):
         """
-        KÉO USER TỪ RENDER VỀ - CẬP NHẬT BALANCE NẾU KHÁC
+        KÉO USER TỪ RENDER VỀ - CHỈ DÙNG sync-bidirectional, KHÔNG TẠO USER MỚI
         """
         try:
             self.log(f"📥 Đang kéo user {user_id} từ Render về...", "INFO")
             
-            # Gọi API force-sync-user để lấy thông tin user
-            response = requests.post(
-                f"{RENDER_URL}/api/force-sync-user",
-                json={'user_id': user_id},
-                timeout=10
-            )
+            # Lấy balance hiện tại từ local
+            local_balance = self.get_user_balance(user_id)
             
-            if response.status_code == 200:
-                data = response.json()
-                render_balance = data.get('balance')
-                
-                if render_balance is not None:
-                    local_balance = self.get_user_balance(user_id)
-                    
-                    if render_balance != local_balance:
-                        # CẬP NHẬT LOCAL
-                        self.update_local_balance(user_id, render_balance)
-                        diff = render_balance - local_balance
-                        self.log(f"✅ User {user_id}: {local_balance}đ → {render_balance}đ ({diff:+,}đ)", "SUCCESS")
-                        
-                        # Gửi thông báo nếu cần
-                        try:
-                            if diff > 0:
-                                self.send_telegram_notification(user_id, render_balance, diff, "NAP")
-                            else:
-                                self.send_telegram_notification(user_id, render_balance, diff, "TIÊU")
-                        except:
-                            pass
-                    else:
-                        self.log(f"✅ User {user_id}: Đã đồng bộ {local_balance}đ", "SUCCESS")
-                    return True
-                else:
-                    self.log(f"⚠️ force-sync-user không trả về balance", "WARNING")
-            else:
-                self.log(f"⚠️ force-sync-user lỗi {response.status_code}", "WARNING")
-                
-            # Nếu force-sync-user không hoạt động, thử sync-bidirectional
-            self.log(f"🔄 Thử sync-bidirectional như dự phòng...", "INFO")
-            response2 = requests.post(
+            # NẾU LOCAL = 0, BỎ QUA (TRÁNH TẠO USER MỚI TRÊN RENDER)
+            if local_balance == 0:
+                self.log(f"⏭️ User {user_id}: Local balance = 0, bỏ qua pull", "INFO")
+                return True
+            
+            # DÙNG sync-bidirectional ĐỂ ĐỒNG BỘ
+            response = requests.post(
                 f"{RENDER_URL}/api/sync-bidirectional",
                 json={
                     'user_id': user_id,
-                    'balance': self.get_user_balance(user_id),
+                    'balance': local_balance,
                     'username': f"user_{user_id}"
                 },
                 timeout=5
             )
             
-            if response2.status_code == 200:
-                data2 = response2.json()
-                # Nếu API trả về balance
-                if data2.get('direct_update'):
-                    render_balance = data2.get('new_balance')
-                    if render_balance:
-                        local_balance = self.get_user_balance(user_id)
-                        if render_balance != local_balance:
-                            self.update_local_balance(user_id, render_balance)
-                            self.log(f"✅ User {user_id}: Cập nhật từ sync-bidirectional", "SUCCESS")
-                        return True
+            if response.status_code == 200:
+                data = response.json()
+                
+                # Nếu API trả về direct_update và có new_balance
+                if data.get('direct_update') and data.get('new_balance'):
+                    render_balance = data.get('new_balance')
+                    
+                    if render_balance != local_balance:
+                        self.update_local_balance(user_id, render_balance)
+                        diff = render_balance - local_balance
+                        self.log(f"✅ User {user_id}: {local_balance}đ → {render_balance}đ ({diff:+,}đ)", "SUCCESS")
+                        
+                        # Gửi thông báo
+                        if diff > 0:
+                            self.send_telegram_notification(user_id, render_balance, diff, "NAP")
+                        else:
+                            self.send_telegram_notification(user_id, render_balance, diff, "TIÊU")
+                    else:
+                        self.log(f"✅ User {user_id}: Đã đồng bộ {local_balance}đ", "SUCCESS")
+                    return True
                 else:
-                    self.log(f"✅ User {user_id}: Giữ nguyên {self.get_user_balance(user_id)}đ", "SUCCESS")
+                    self.log(f"✅ User {user_id}: Giữ nguyên {local_balance}đ", "SUCCESS")
                     return True
             else:
-                self.log(f"⚠️ sync-bidirectional lỗi {response2.status_code}", "WARNING")
+                self.log(f"⚠️ sync-bidirectional lỗi {response.status_code}", "WARNING")
                 return False
                 
         except Exception as e:
