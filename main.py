@@ -5,6 +5,8 @@ import atexit
 import asyncio
 import time
 import requests
+import shutil
+import threading
 from database.models import SyncedTransaction
 from datetime import datetime, timedelta, timezone
 from flask import Flask, request, jsonify
@@ -30,6 +32,70 @@ from handlers.rent import (
 from handlers.balance import balance_command
 from handlers.deposit import deposit_command, deposit_amount_callback, deposit_check_callback
 from handlers.callback import menu_callback
+
+# ===== BACKUP DATABASE TỰ ĐỘNG =====
+# Cấu hình backup
+BACKUP_INTERVAL = 60  # Backup mỗi 60 giây
+BACKUP_FOLDER = 'database/backups'
+MAX_BACKUPS = 50  # Giữ tối đa 50 bản backup gần nhất
+
+# Tạo thư mục backup nếu chưa có
+if not os.path.exists(BACKUP_FOLDER):
+    os.makedirs(BACKUP_FOLDER)
+    logger = logging.getLogger(__name__)
+    logger.info(f"📁 Đã tạo thư mục backup: {BACKUP_FOLDER}")
+
+def backup_database():
+    """Backup database theo giây"""
+    logger = logging.getLogger(__name__)
+    try:
+        src = 'database/bot.db'
+        if not os.path.exists(src):
+            logger.warning(f"⚠️ Không tìm thấy database: {src}")
+            return
+        
+        # Tạo tên file backup với timestamp giây
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        dst = f'{BACKUP_FOLDER}/bot_backup_{timestamp}.db'
+        
+        # Copy database
+        shutil.copy2(src, dst)
+        logger.info(f"✅ Backup thành công: {dst}")
+        
+        # Xóa các backup cũ
+        cleanup_old_backups()
+        
+    except Exception as e:
+        logger.error(f"❌ Lỗi backup: {e}")
+
+def cleanup_old_backups():
+    """Giữ lại MAX_BACKUPS bản gần nhất, xóa các bản cũ"""
+    logger = logging.getLogger(__name__)
+    try:
+        backups = []
+        for f in os.listdir(BACKUP_FOLDER):
+            if f.startswith('bot_backup_') and f.endswith('.db'):
+                path = os.path.join(BACKUP_FOLDER, f)
+                backups.append((path, os.path.getmtime(path)))
+        
+        # Sắp xếp theo thời gian (cũ nhất trước)
+        backups.sort(key=lambda x: x[1])
+        
+        # Xóa các bản cũ hơn MAX_BACKUPS
+        while len(backups) > MAX_BACKUPS:
+            oldest = backups.pop(0)
+            os.remove(oldest[0])
+            logger.info(f"🗑️ Đã xóa backup cũ: {os.path.basename(oldest[0])}")
+            
+    except Exception as e:
+        logger.error(f"❌ Lỗi dọn backup: {e}")
+
+def auto_backup_loop():
+    """Vòng lặp backup tự động"""
+    logger = logging.getLogger(__name__)
+    while True:
+        backup_database()
+        time.sleep(BACKUP_INTERVAL)
 
 # ===== ĐỌC BIẾN MÔI TRƯỜNG =====
 import os
@@ -75,6 +141,7 @@ VN_TZ = timezone(timedelta(hours=7))
 def get_vn_time():
     """Lấy thời gian Việt Nam hiện tại"""
     return datetime.now(VN_TZ).replace(tzinfo=None)
+
 # ===== CẤU HÌNH LOGGING =====
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
@@ -721,6 +788,11 @@ scheduler.add_job(
 
 atexit.register(lambda: scheduler.shutdown())
 
+# ===== KHỞI ĐỘNG BACKUP THREAD =====
+backup_thread = threading.Thread(target=auto_backup_loop, daemon=True)
+backup_thread.start()
+logger.info(f"🔄 Backup tự động mỗi {BACKUP_INTERVAL} giây - Lưu tại {BACKUP_FOLDER}/")
+
 logger.info("="*60)
 logger.info("🚀 HỆ THỐNG ĐÃ KHỞI ĐỘNG VỚI 12 API:")
 logger.info("  1. POST /api/check-transaction - Kiểm tra giao dịch")
@@ -738,6 +810,7 @@ logger.info(" 12. GET  /api/auto-sync - Đồng bộ tự động")
 logger.info("="*60)
 logger.info("⏱️  Auto check giao dịch mới: 10 giây/lần")
 logger.info("⏱️  Auto check số hết hạn: 5 phút/lần")
+logger.info("🔄 Backup tự động: 60 giây/lần - Giữ 50 bản gần nhất")
 logger.info("="*60)
 
 if __name__ == '__main__':
@@ -767,4 +840,3 @@ if __name__ == '__main__':
             time.sleep(60)
     except KeyboardInterrupt:
         logger.info("👋 Đã dừng Flask server")
-
