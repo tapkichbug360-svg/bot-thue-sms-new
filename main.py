@@ -590,14 +590,60 @@ def api_reset_cache():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
-# ===== API 10: ĐỒNG BỘ 2 CHIỀU TỰ ĐỘNG =====
+# ===== API 10: ĐỒNG BỘ 2 CHIỀU + UPDATE BALANCE TRỰC TIẾP =====
 @app.route('/api/sync-bidirectional', methods=['POST'])
 def api_sync_bidirectional():
     try:
         data = request.json
+        logger.info(f"📥 Sync bidirectional request: {data}")
+        
+        # ===== KIỂM TRA CẢ 2 TRƯỜNG HỢP =====
+        # 1. Có local_transactions không?
         local_transactions = data.get('local_transactions', [])
         
+        # 2. Có user_id và balance không? (CẬP NHẬT TRỰC TIẾP)
+        user_id = data.get('user_id')
+        balance = data.get('balance')
+        username = data.get('username')
+        
         with app.app_context():
+            # === TRƯỜNG HỢP 1: UPDATE BALANCE TRỰC TIẾP ===
+            if user_id and balance is not None:
+                user = get_or_create_user(user_id, username)
+                old_balance = user.balance
+                user.balance = balance
+                user.last_active = get_vn_time()
+                if username:
+                    user.username = username
+                
+                db.session.commit()
+                
+                logger.info(f"💰 DIRECT UPDATE: User {user_id}: {old_balance}đ → {balance}đ")
+                
+                # Tạo transaction để ghi nhận (nếu cần)
+                trans_code = f"DIRECT_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                transaction = Transaction(
+                    user_id=user.id,
+                    amount=balance - old_balance,
+                    type='adjustment',
+                    status='success',
+                    transaction_code=trans_code,
+                    description=f"Direct balance update from API",
+                    created_at=get_vn_time()
+                )
+                db.session.add(transaction)
+                db.session.commit()
+                
+                return jsonify({
+                    "success": True,
+                    "direct_update": True,
+                    "user_id": user.user_id,
+                    "old_balance": old_balance,
+                    "new_balance": user.balance,
+                    "message": "Balance updated successfully"
+                }), 200
+            
+            # === TRƯỜNG HỢP 2: ĐỒNG BỘ TỪ LOCAL TRANSACTIONS ===
             render_pending = Transaction.query.filter_by(status='pending').all()
             render_codes = {t.transaction_code for t in render_pending}
             
@@ -605,7 +651,7 @@ def api_sync_bidirectional():
             synced_from_local = 0
             sync_to_local = []
             
-            # 1. ĐỒNG BỘ TỪ LOCAL LÊN RENDER
+            # ĐỒNG BỘ TỪ LOCAL LÊN RENDER
             for lt in local_transactions:
                 local_codes.add(lt['code'])
                 
@@ -625,7 +671,7 @@ def api_sync_bidirectional():
                     synced_from_local += 1
                     logger.info(f"✅ Đồng bộ từ local: {lt['code']}")
             
-            # 2. CHUẨN BỊ DỮ LIỆU ĐỒNG BỘ VỀ LOCAL
+            # CHUẨN BỊ DỮ LIỆU ĐỒNG BỘ VỀ LOCAL
             for trans in render_pending:
                 if trans.transaction_code not in local_codes:
                     user = User.query.get(trans.user_id)
@@ -644,7 +690,8 @@ def api_sync_bidirectional():
                 "success": True,
                 "synced_from_local": synced_from_local,
                 "sync_to_local": sync_to_local,
-                "render_pending_count": len(render_pending)
+                "render_pending_count": len(render_pending),
+                "direct_update": False
             }), 200
             
     except Exception as e:
