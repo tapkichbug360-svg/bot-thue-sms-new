@@ -291,10 +291,11 @@ async def main():
         
         # Thêm job kiểm tra giao dịch mới (chạy mỗi 10 giây)
         scheduler.add_job(
-        check_new_transactions, 
-        trigger=IntervalTrigger(seconds=10, misfire_grace_time=30),  # THÊM Ở ĐÂY
-        id='check_new_transactions',  # THÊM ID ĐỂ DỄ QUẢN LÝ
-        misfire_grace_time=30  # HOẶC THÊM Ở ĐÂY 
+            check_new_transactions,
+            trigger='interval',  # ĐỔI thành string
+            seconds=10,
+            id='check_new_transactions',
+            misfire_grace_time=30
         )
         
         scheduler.start()
