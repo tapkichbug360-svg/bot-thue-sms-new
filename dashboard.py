@@ -1673,7 +1673,7 @@ def add_money():
         
         # ===== PUSH LÊN RENDER NGAY =====
         try:
-            RENDER_URL = os.getenv('RENDER_URL', 'https://bot-thue-sms-new.onrender.com')
+            RENDER_URL = "https://bot-thue-sms-new.onrender.com"  # Cứng hóa URL đúng
             push_data = {
                 'user_id': user.user_id,
                 'balance': user.balance,
@@ -1754,7 +1754,7 @@ def deduct_money():
         
         # ===== PUSH LÊN RENDER NGAY (ĐÃ SỬA) =====
         try:
-            RENDER_URL = os.getenv('RENDER_URL', 'https://bot-thue-sms-new.onrender.com')
+            RENDER_URL = "https://bot-thue-sms-new.onrender.com"  # Cứng hóa URL đúng
             push_data = {
                 'user_id': user.user_id,
                 'balance': user.balance,
