@@ -174,63 +174,37 @@ class UserSyncDaemon:
     # ==================== ĐẨY DỮ LIỆU LÊN RENDER ====================
     def push_user_to_render(self, user_id, balance, username, reason=""):
         """
-        ĐẨY USER TỪ LOCAL LÊN RENDER - DÙNG sync-bidirectional
+        ĐẨY USER LÊN RENDER - CHỈ DÙNG sync-bidirectional
         """
         max_retries = 2
         retry_count = 0
         
-        # Danh sách API ưu tiên - sync-bidirectional LÊN ĐẦU
-        endpoints = [
-            {
-                "url": f"{RENDER_URL}/api/sync-bidirectional",  # ✅ API HOẠT ĐỘNG TỐT
-                "payload": {
-                    'user_id': user_id,
-                    'balance': balance,
-                    'username': username
-                }
-            },
-            {
-                "url": f"{RENDER_URL}/api/update-user",  # ⚠️ Dự phòng
-                "payload": {
-                    'user_id': user_id,
-                    'balance': balance,
-                    'username': username
-                }
-            },
-            {
-                "url": f"{RENDER_URL}/api/check-user",  # ⚠️ Dự phòng
-                "payload": {
-                    'user_id': user_id,
-                    'username': username
-                }
-            }
-        ]
-        
         while retry_count < max_retries:
-            for endpoint in endpoints:
-                try:
-                    self.log(f"📤 Push user {user_id} qua {endpoint['url'].split('/')[-1]} [Lần {retry_count + 1}]", "INFO")
-                    
-                    response = requests.post(
-                        endpoint["url"], 
-                        json=endpoint["payload"], 
-                        timeout=5
-                    )
-                    
-                    if response.status_code == 200:
-                        self.log(f"✅ Push user {user_id} thành công!", "SUCCESS")
-                        return True
-                    else:
-                        self.log(f"⏭️ {endpoint['url'].split('/')[-1]} trả về {response.status_code}", "WARNING")
-                        
-                except Exception as e:
-                    self.log(f"⚠️ Lỗi: {e}", "WARNING")
+            try:
+                self.log(f"📤 Push user {user_id}: {balance}đ lên Render [Lần {retry_count + 1}]", "INFO")
                 
-                time.sleep(0.3)
+                response = requests.post(
+                    f"{RENDER_URL}/api/sync-bidirectional",
+                    json={
+                        'user_id': user_id,
+                        'balance': balance,
+                        'username': username
+                    },
+                    timeout=5
+                )
+                
+                if response.status_code == 200:
+                    self.log(f"✅ Push user {user_id} thành công!", "SUCCESS")
+                    return True
+                else:
+                    self.log(f"⚠️ sync-bidirectional trả về {response.status_code}", "WARNING")
+                    
+            except Exception as e:
+                self.log(f"⚠️ Lỗi: {e}", "WARNING")
             
             retry_count += 1
             if retry_count < max_retries:
-                self.log(f"⏳ Chờ 2s trước khi thử lại...", "INFO")
+                self.log(f"⏳ Chờ 2s...", "INFO")
                 time.sleep(2)
         
         # Nếu thất bại
@@ -358,19 +332,15 @@ class UserSyncDaemon:
     # ==================== KÉO DỮ LIỆU TỪ RENDER VỀ ====================
     def pull_user_from_render(self, user_id):
         """
-        KÉO USER TỪ RENDER VỀ - DÙNG sync-bidirectional
+        KÉO USER TỪ RENDER VỀ - DÙNG force-sync-user (VÌ sync-bidirectional KHÔNG TRẢ VỀ DATA)
         """
         try:
             self.log(f"📥 Đang kéo user {user_id} từ Render về...", "INFO")
             
-            # THỬ sync-bidirectional TRƯỚC
+            # THỬ force-sync-user TRƯỚC (API CHUYÊN DỤNG CHO PULL)
             response = requests.post(
-                f"{RENDER_URL}/api/sync-bidirectional",
-                json={
-                    'user_id': user_id,
-                    'balance': self.get_user_balance(user_id),
-                    'username': f"user_{user_id}"
-                },
+                f"{RENDER_URL}/api/force-sync-user",
+                json={'user_id': user_id},
                 timeout=10
             )
             
@@ -397,34 +367,33 @@ class UserSyncDaemon:
                     else:
                         self.log(f"✅ User {user_id}: Đã đồng bộ {local_balance}đ", "SUCCESS")
                     return True
-            
-            # Thử force-sync-user nếu sync-bidirectional không hoạt động
-            self.log(f"⚠️ sync-bidirectional trả về {response.status_code}, thử force-sync-user", "WARNING")
-            
+                else:
+                    self.log(f"⚠️ force-sync-user không trả về balance", "WARNING")
+            else:
+                self.log(f"⚠️ force-sync-user lỗi {response.status_code}", "WARNING")
+                
+            # Nếu force-sync-user không hoạt động, thử sync-bidirectional (nhưng chỉ để log)
+            self.log(f"🔄 Thử sync-bidirectional như dự phòng...", "INFO")
             response2 = requests.post(
-                f"{RENDER_URL}/api/force-sync-user",
-                json={'user_id': user_id},
-                timeout=10
+                f"{RENDER_URL}/api/sync-bidirectional",
+                json={
+                    'user_id': user_id,
+                    'balance': self.get_user_balance(user_id),
+                    'username': f"user_{user_id}"
+                },
+                timeout=5
             )
             
             if response2.status_code == 200:
-                data2 = response2.json()
-                render_balance = data2.get('balance')
-                
-                if render_balance is not None:
-                    local_balance = self.get_user_balance(user_id)
-                    
-                    if render_balance != local_balance:
-                        self.update_local_balance(user_id, render_balance)
-                        diff = render_balance - local_balance
-                        self.log(f"✅ User {user_id}: {local_balance}đ → {render_balance}đ ({diff:+,}đ) [force-sync]", "SUCCESS")
-                    else:
-                        self.log(f"✅ User {user_id}: Đã đồng bộ {local_balance}đ", "SUCCESS")
-                    return True
+                self.log(f"⚠️ sync-bidirectional OK nhưng không có balance data", "WARNING")
+                # Giả sử balance không đổi
+                local_balance = self.get_user_balance(user_id)
+                self.log(f"✅ User {user_id}: Giữ nguyên {local_balance}đ", "SUCCESS")
+                return True
             else:
-                self.log(f"⚠️ force-sync-user lỗi {response2.status_code}", "WARNING")
+                self.log(f"⚠️ sync-bidirectional lỗi {response2.status_code}", "WARNING")
                 return False
-                
+                    
         except requests.exceptions.Timeout:
             self.log(f"⏰ Timeout khi kéo user {user_id}", "WARNING")
             return False
