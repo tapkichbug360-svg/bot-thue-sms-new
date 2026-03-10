@@ -591,6 +591,7 @@ def api_reset_cache():
         return jsonify({"success": False, "error": str(e)}), 500
 
 # ===== API 10: ĐỒNG BỘ 2 CHIỀU + UPDATE BALANCE TRỰC TIẾP =====
+# ===== API 10: ĐỒNG BỘ 2 CHIỀU + UPDATE BALANCE TRỰC TIẾP =====
 @app.route('/api/sync-bidirectional', methods=['POST'])
 def api_sync_bidirectional():
     try:
@@ -598,10 +599,7 @@ def api_sync_bidirectional():
         logger.info(f"📥 Sync bidirectional request: {data}")
         
         # ===== KIỂM TRA CẢ 2 TRƯỜNG HỢP =====
-        # 1. Có local_transactions không?
         local_transactions = data.get('local_transactions', [])
-        
-        # 2. Có user_id và balance không? (CẬP NHẬT TRỰC TIẾP)
         user_id = data.get('user_id')
         balance = data.get('balance')
         username = data.get('username')
@@ -611,28 +609,41 @@ def api_sync_bidirectional():
             if user_id and balance is not None:
                 user = get_or_create_user(user_id, username)
                 old_balance = user.balance
-                user.balance = balance
-                user.last_active = get_vn_time()
-                if username:
-                    user.username = username
                 
-                db.session.commit()
-                
-                logger.info(f"💰 DIRECT UPDATE: User {user_id}: {old_balance}đ → {balance}đ")
-                
-                # Tạo transaction để ghi nhận (nếu cần)
-                trans_code = f"DIRECT_{int(time.time() * 1000)}"
-                transaction = Transaction(
-                    user_id=user.id,
-                    amount=balance - old_balance,
-                    type='adjustment',
-                    status='success',
-                    transaction_code=trans_code,
-                    description=f"Direct balance update from API",
-                    created_at=get_vn_time()
-                )
-                db.session.add(transaction)
-                db.session.commit()
+                # CHỈ CẬP NHẬT NẾU KHÁC
+                if user.balance != balance:
+                    user.balance = balance
+                    user.last_active = get_vn_time()
+                    if username:
+                        user.username = username
+                    
+                    db.session.commit()
+                    
+                    logger.info(f"💰 DIRECT UPDATE: User {user_id}: {old_balance}đ → {balance}đ")
+                    
+                    # CHỈ TẠO TRANSACTION NẾU SỐ TIỀN THAY ĐỔI (KHÁC 0)
+                    amount_diff = balance - old_balance
+                    if amount_diff != 0:
+                        # DÙNG MILLISECONDS + RANDOM ĐỂ TRÁNH TRÙNG
+                        import secrets
+                        millis = int(time.time() * 1000)
+                        random_suffix = secrets.token_hex(2).upper()
+                        trans_code = f"DIRECT_{millis}_{random_suffix}"
+                        
+                        transaction = Transaction(
+                            user_id=user.id,
+                            amount=amount_diff,
+                            type='adjustment',
+                            status='success',
+                            transaction_code=trans_code,
+                            description=f"Direct balance update from API",
+                            created_at=get_vn_time()
+                        )
+                        db.session.add(transaction)
+                        db.session.commit()
+                        logger.info(f"✅ Đã tạo transaction {trans_code}: {amount_diff:+,}đ")
+                    else:
+                        logger.info(f"⏭️ Balance không đổi, bỏ qua tạo transaction")
                 
                 return jsonify({
                     "success": True,
@@ -651,7 +662,6 @@ def api_sync_bidirectional():
             synced_from_local = 0
             sync_to_local = []
             
-            # ĐỒNG BỘ TỪ LOCAL LÊN RENDER
             for lt in local_transactions:
                 local_codes.add(lt['code'])
                 
@@ -671,7 +681,6 @@ def api_sync_bidirectional():
                     synced_from_local += 1
                     logger.info(f"✅ Đồng bộ từ local: {lt['code']}")
             
-            # CHUẨN BỊ DỮ LIỆU ĐỒNG BỘ VỀ LOCAL
             for trans in render_pending:
                 if trans.transaction_code not in local_codes:
                     user = User.query.get(trans.user_id)

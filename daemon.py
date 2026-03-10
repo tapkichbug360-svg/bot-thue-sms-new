@@ -408,7 +408,7 @@ class UserSyncDaemon:
             return False
     
     def pull_user_batch(self, users):
-        """Kéo nhiều user song song"""
+        """Kéo nhiều user song song - CÓ CẬP NHẬT BALANCE"""
         if not users:
             return 0
             
@@ -422,9 +422,26 @@ class UserSyncDaemon:
             for future in concurrent.futures.as_completed(futures):
                 if future.result():
                     success += 1
-                time.sleep(0.05)  # Tránh quá tải
         
         return success
+    def force_sync_user(self, user_id):
+        """Force đồng bộ một user cụ thể"""
+        self.log(f"🔄 Force sync user {user_id}...", "INFO")
+        
+        # Push lên Render
+        balance = self.get_user_balance(user_id)
+        username = f"user_{user_id}"
+        self.push_user_to_render(user_id, balance, username, "force_sync")
+        
+        # Pull từ Render về
+        result = self.pull_user_from_render(user_id)
+        
+        if result:
+            self.log(f"✅ Force sync user {user_id} thành công", "SUCCESS")
+        else:
+            self.log(f"❌ Force sync user {user_id} thất bại", "ERROR")
+        
+        return result
     
     # ==================== XỬ LÝ FAILED PUSHES ====================
     def _save_failed_push(self, user_id, balance, username, reason):
