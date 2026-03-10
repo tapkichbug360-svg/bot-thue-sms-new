@@ -87,11 +87,10 @@ def setup_sepay_webhook(app):
                     transaction_code=transaction_code
                 ).first()
                 
-                # ===== XÁC ĐỊNH USER - ÁP DỤNG CHO TẤT CẢ USER =====
+                # ===== XÁC ĐỊNH USER =====
                 target_user = None
                 
-                # CÁCH 1: Tìm user_id trong nội dung (ƯU TIÊN NHẤT - CHO MỌI USER)
-                # Format: "tu 123456789", "tu123456789", "từ 123456789"
+                # CÁCH 1: Tìm user_id trong nội dung
                 user_match = re.search(r'tu[_\s]*(\d+)', content, re.IGNORECASE)
                 if user_match:
                     found_user_id = int(user_match.group(1))
@@ -99,7 +98,7 @@ def setup_sepay_webhook(app):
                     if target_user:
                         logger.info(f"✅ Cách 1: Tìm thấy user {target_user.user_id} từ nội dung")
                 
-                # CÁCH 2: Tìm user_id dạng UID (CHO MỌI USER)
+                # CÁCH 2: Tìm user_id dạng UID
                 if not target_user:
                     uid_match = re.search(r'UID(\d+)', content, re.IGNORECASE)
                     if uid_match:
@@ -108,7 +107,7 @@ def setup_sepay_webhook(app):
                         if target_user:
                             logger.info(f"✅ Cách 2: Tìm thấy user {target_user.user_id} từ UID")
                 
-                # CÁCH 3: Tìm user_id dạng ID (CHO MỌI USER)
+                # CÁCH 3: Tìm user_id dạng ID
                 if not target_user:
                     id_match = re.search(r'ID(\d+)', content, re.IGNORECASE)
                     if id_match:
@@ -117,19 +116,18 @@ def setup_sepay_webhook(app):
                         if target_user:
                             logger.info(f"✅ Cách 3: Tìm thấy user {target_user.user_id} từ ID")
                 
-                # CÁCH 4: Từ giao dịch có sẵn (CHO MỌI USER)
+                # CÁCH 4: Từ giao dịch có sẵn
                 if not target_user and transaction:
                     target_user = User.query.get(transaction.user_id)
                     if target_user:
                         logger.info(f"✅ Cách 4: Tìm thấy user {target_user.user_id} từ giao dịch")
                 
-                # CÁCH 5: Tìm user gần đây nhất (FALLBACK CHO MỌI USER)
+                # CÁCH 5: Tìm user gần đây nhất
                 if not target_user:
                     target_user = User.query.order_by(User.last_active.desc()).first()
                     if target_user:
                         logger.warning(f"⚠️ Cách 5: Dùng user gần đây {target_user.user_id} (FALLBACK)")
                 
-                # NẾU KHÔNG TÌM THẤY USER -> TỪ CHỐI GIAO DỊCH
                 if not target_user:
                     logger.error(f"❌ KHÔNG TÌM THẤY USER CHO GIAO DỊCH {transaction_code}")
                     return jsonify({
@@ -179,11 +177,43 @@ def setup_sepay_webhook(app):
                     )
                     
                     # Gửi Telegram đồng bộ
-                    send_telegram_sync(target_user.user_id, message)
-                    logger.info(f"📨 ĐÃ GỬI TELEGRAM CHO USER {target_user.user_id}")
+                    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+                    payload = {
+                        'chat_id': target_user.user_id,
+                        'text': message,
+                        'parse_mode': 'Markdown'
+                    }
+                    response = requests.post(url, json=payload, timeout=10)
                     
+                    if response.status_code == 200:
+                        logger.info(f"📨 Đã gửi Telegram cho user {target_user.user_id}")
+                    else:
+                        logger.warning(f"⚠️ Telegram lỗi {response.status_code}")
+                        
                 except Exception as e:
                     logger.error(f"❌ Lỗi gửi Telegram: {e}")
+                
+                # ===== PUSH LÊN RENDER NGAY =====
+                try:
+                    RENDER_URL = os.getenv('RENDER_URL', 'https://bot-thue-sms-new.onrender.com')
+                    
+                    push_response = requests.post(
+                        f"{RENDER_URL}/api/sync-bidirectional",
+                        json={
+                            'user_id': target_user.user_id,
+                            'balance': target_user.balance,
+                            'username': target_user.username or f"user_{target_user.user_id}"
+                        },
+                        timeout=5
+                    )
+                    
+                    if push_response.status_code == 200:
+                        logger.info(f"✅ Đã push balance {target_user.balance}đ lên Render")
+                    else:
+                        logger.warning(f"⚠️ Push balance thất bại: {push_response.status_code}")
+                        
+                except Exception as e:
+                    logger.error(f"❌ Lỗi push lên Render: {e}")
                 
                 logger.info(f"📌 Giao dịch {transaction_code} hoàn tất")
 
