@@ -5,66 +5,52 @@ import asyncio
 import signal
 import psutil
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler
+from telegram import Bot
+from telegram.request import HTTPXRequest
 from flask import Flask
 from database.models import db, User, Transaction, DepositTransaction, PushedTransaction
-# Đầu file, thêm imports
-from datetime import datetime, timedelta, timezone
-from telegram import Bot  # THÊM DÒNG NÀY
+from dotenv import load_dotenv
+
+# ==================== CẤU HÌNH LOGGING ====================
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger('apscheduler.executors.default').setLevel(logging.WARNING)
 logging.getLogger('apscheduler.scheduler').setLevel(logging.WARNING)
 
-# Thêm sau imports
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# ==================== MÚI GIỜ ====================
 VN_TZ = timezone(timedelta(hours=7))
 
 def get_vn_time():
     """Lấy thời gian Việt Nam hiện tại"""
     return datetime.now(VN_TZ).replace(tzinfo=None)
 
-# === ĐỌC TRỰC TIẾP TẤT CẢ BIẾN TỪ FILE .ENV ===
+# ==================== ĐỌC BIẾN MÔI TRƯỜNG ====================
 print("📁 Đang đọc file .env...")
+load_dotenv()  # Tự động đọc file .env
 
-BOT_TOKEN = None
-API_KEY = None
-BASE_URL = None
-ADMIN_ID = None
-MB_ACCOUNT = None
-MB_NAME = None
-RENDER_URL = None
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+API_KEY = os.getenv('API_KEY')
+BASE_URL = os.getenv('BASE_URL')
+ADMIN_ID = os.getenv('ADMIN_ID')
+MB_ACCOUNT = os.getenv('MB_ACCOUNT')
+MB_NAME = os.getenv('MB_NAME')
+RENDER_URL = os.getenv('RENDER_URL')
 
-if os.path.exists('.env'):
-    with open('.env', 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-            if '=' in line:
-                key, value = line.split('=', 1)
-                value = value.strip()
-                os.environ[key] = value
-                if key == 'BOT_TOKEN':
-                    BOT_TOKEN = value
-                    print(f"   ✅ BOT_TOKEN: {value[:10]}...")
-                elif key == 'API_KEY':
-                    API_KEY = value
-                    print(f"   ✅ API_KEY: {value[:10]}...")
-                elif key == 'BASE_URL':
-                    BASE_URL = value
-                    print(f"   ✅ BASE_URL: {value}")
-                elif key == 'ADMIN_ID':
-                    ADMIN_ID = value
-                elif key == 'MB_ACCOUNT':
-                    MB_ACCOUNT = value
-                elif key == 'MB_NAME':
-                    MB_NAME = value
-                elif key == 'RENDER_URL':
-                    RENDER_URL = value
-                    print(f"   ✅ RENDER_URL: {value}")
+# In ra để kiểm tra (ẩn 1 phần)
+print(f"   ✅ BOT_TOKEN: {BOT_TOKEN[:10] if BOT_TOKEN else 'None'}...")
+print(f"   ✅ API_KEY: {API_KEY[:10] if API_KEY else 'None'}...")
+print(f"   ✅ BASE_URL: {BASE_URL}")
+print(f"   ✅ RENDER_URL: {RENDER_URL}")
 print(f"🔍 BOT DÙNG DATABASE: {os.path.abspath('database/bot.db')}")
 
-# Kiểm tra các biến quan trọng
+# Kiểm tra biến quan trọng
 if not BOT_TOKEN:
     print("❌ KHÔNG TÌM THẤY BOT_TOKEN")
     sys.exit(1)
@@ -77,14 +63,7 @@ if not BASE_URL:
 
 print("✅ Đã đọc tất cả biến môi trường thành công!")
 
-# Cấu hình logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
-# === DATABASE ===
+# ==================== DATABASE ====================
 app = Flask(__name__)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 db_path = os.path.join(BASE_DIR, 'database', 'bot.db')
@@ -93,7 +72,7 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db.init_app(app)
 logger.info(f"✅ Database path: {db_path}")
 
-# ===== HÀM GỬI THÔNG BÁO TELEGRAM =====
+# ==================== HÀM GỬI THÔNG BÁO TELEGRAM ====================
 async def send_telegram_message(chat_id, text):
     """Gửi tin nhắn Telegram đến user"""
     try:
@@ -109,7 +88,7 @@ async def send_telegram_message(chat_id, text):
         logger.error(f"❌ Lỗi gửi Telegram: {e}")
         return False
 
-# ===== HÀM KIỂM TRA GIAO DỊCH MỚI =====
+# ==================== HÀM KIỂM TRA GIAO DỊCH MỚI ====================
 async def check_new_transactions():
     """Kiểm tra giao dịch mới và gửi thông báo"""
     with app.app_context():
@@ -143,7 +122,7 @@ async def check_new_transactions():
         except Exception as e:
             logger.error(f"❌ Lỗi kiểm tra giao dịch: {e}")
 
-# Import handlers
+# ==================== IMPORT HANDLERS ====================
 try:
     from handlers.start import (
         start_command, menu_command, cancel, help_command, 
@@ -166,6 +145,7 @@ except Exception as e:
     traceback.print_exc()
     sys.exit(1)
 
+# ==================== HÀM DỌN DẸP ====================
 def kill_other_instances():
     """Kill các instance bot khác đang chạy"""
     current_pid = os.getpid()
@@ -240,6 +220,7 @@ async def set_bot_commands(application):
     await application.bot.set_my_commands(commands)
     logger.info("✅ Đã thiết lập menu commands")
 
+# ==================== HÀM MAIN ====================
 async def main():
     """Hàm chính khởi động bot"""
     killed = kill_other_instances()
@@ -260,8 +241,17 @@ async def main():
                 logger.error(f"❌ Lỗi kết nối database: {e}")
                 sys.exit(1)
         
-        # Tạo application
-        application = Application.builder().token(BOT_TOKEN).build()
+        # Cấu hình request với timeout dài hơn
+        request = HTTPXRequest(
+            connection_pool_size=20,
+            read_timeout=30,
+            write_timeout=30,
+            connect_timeout=30,
+            pool_timeout=30
+        )
+        
+        # Tạo application với request đã cấu hình
+        application = Application.builder().token(BOT_TOKEN).request(request).build()
         
         # Thiết lập menu commands
         await set_bot_commands(application)
@@ -319,6 +309,7 @@ async def main():
         traceback.print_exc()
         sys.exit(1)
 
+# ==================== CHẠY BOT ====================
 if __name__ == '__main__':
     try:
         asyncio.run(main())

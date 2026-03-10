@@ -6,6 +6,9 @@ import logging
 import os
 import requests
 import asyncio
+import time
+from functools import wraps
+from telegram.error import TimedOut, NetworkError
 # Đầu file, thêm imports
 from datetime import datetime, timedelta, timezone
 
@@ -22,6 +25,110 @@ MB_ACCOUNT = os.getenv('MB_ACCOUNT', '666666291005')
 MB_NAME = os.getenv('MB_NAME', 'NGUYEN THE LAM')
 RENDER_URL = os.getenv('RENDER_URL', 'https://bot-thue-sms-new.onrender.com')
 
+# ==================== HÀM XỬ LÝ TIMEOUT ====================
+async def safe_send_message(update, text, reply_markup=None, parse_mode='Markdown', max_retries=2):
+    """Gửi tin nhắn an toàn, tự động retry khi timeout"""
+    for attempt in range(max_retries):
+        try:
+            if update.callback_query:
+                return await update.callback_query.edit_message_text(
+                    text=text,
+                    reply_markup=reply_markup,
+                    parse_mode=parse_mode,
+                    read_timeout=10,
+                    write_timeout=10,
+                    connect_timeout=10,
+                    pool_timeout=10
+                )
+            else:
+                return await update.message.reply_text(
+                    text=text,
+                    reply_markup=reply_markup,
+                    parse_mode=parse_mode,
+                    read_timeout=10,
+                    write_timeout=10,
+                    connect_timeout=10,
+                    pool_timeout=10
+                )
+        except (TimedOut, NetworkError) as e:
+            if attempt == max_retries - 1:
+                logger.error(f"❌ Thất bại sau {max_retries} lần: {e}")
+                # Gửi tin nhắn đơn giản không có markup
+                if update.callback_query:
+                    return await update.callback_query.edit_message_text(
+                        text=text,
+                        parse_mode=parse_mode
+                    )
+                else:
+                    return await update.message.reply_text(
+                        text=text + "\n\n⚠️ Hệ thống đang chậm, vui lòng thử lại.",
+                        parse_mode=parse_mode
+                    )
+            logger.warning(f"⏰ Timeout lần {attempt + 1}, thử lại sau {attempt + 1}s...")
+            await asyncio.sleep(attempt + 1)
+    return None
+
+async def safe_delete_message(message):
+    """Xóa tin nhắn an toàn"""
+    try:
+        await message.delete()
+    except Exception as e:
+        logger.warning(f"⚠️ Không thể xóa message: {e}")
+
+# ==================== DECORATOR RETRY ====================
+def retry_on_timeout(max_retries=2, delay=1):
+    """Decorator tự động retry khi bị timeout"""
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            for attempt in range(max_retries):
+                try:
+                    return await func(*args, **kwargs)
+                except (TimedOut, NetworkError) as e:
+                    if attempt == max_retries - 1:
+                        logger.error(f"❌ Thất bại sau {max_retries} lần: {e}")
+                        raise
+                    logger.warning(f"⏰ Timeout lần {attempt + 1}, thử lại sau {delay}s...")
+                    await asyncio.sleep(delay * (attempt + 1))
+            return None
+        return wrapper
+    return decorator
+
+# ==================== CACHE MENU ====================
+menu_cache = {}
+menu_cache_time = {}
+CACHE_DURATION = 300  # 5 phút
+
+def get_cached_menu(menu_name):
+    """Lấy menu từ cache nếu còn hạn"""
+    now = time.time()
+    if menu_name in menu_cache and now - menu_cache_time.get(menu_name, 0) < CACHE_DURATION:
+        return menu_cache[menu_name]
+    return None
+
+def cache_menu(menu_name, keyboard):
+    """Cache menu"""
+    menu_cache[menu_name] = keyboard
+    menu_cache_time[menu_name] = time.time()
+
+def create_main_menu():
+    """Tạo menu chính"""
+    keyboard = [
+        [InlineKeyboardButton("📱 Thuê số", callback_data='menu_rent'),
+         InlineKeyboardButton("📋 Số đang thuê", callback_data='menu_rent_list')],
+        [InlineKeyboardButton("💰 Số dư", callback_data='menu_balance'),
+         InlineKeyboardButton("💳 Nạp tiền", callback_data='menu_deposit')],
+        [InlineKeyboardButton("📜 Lịch sử", callback_data='menu_history'),
+         InlineKeyboardButton("👤 Tài khoản", callback_data='menu_profile')],
+        [InlineKeyboardButton("❓ Hướng dẫn", callback_data='menu_help')]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+# Cache menu chính
+main_menu = create_main_menu()
+cache_menu("main", main_menu)
+
+# ==================== HÀM ĐỒNG BỘ ====================
 async def sync_balance_with_render(user_id):
     """Đồng bộ số dư với Render - CHỈ LẤY SỐ CAO HƠN"""
     try:
@@ -120,6 +227,8 @@ async def push_user_to_render(user_id, username):
         logger.error(f"❌ Lỗi push user {user_id}: {e}")
         return False
 
+# ==================== COMMAND HANDLERS ====================
+@retry_on_timeout(max_retries=2, delay=1)
 async def start_command(update: Update, context: Context):
     """Xử lý lệnh /start"""
     user = update.effective_user
@@ -164,17 +273,8 @@ async def start_command(update: Update, context: Context):
             if old_balance != current_balance:
                 logger.info(f"💰 Đồng bộ user {user.id}: {old_balance}đ → {current_balance}đ")
     
-    # Tạo keyboard menu chính
-    keyboard = [
-        [InlineKeyboardButton("📱 Thuê số", callback_data='menu_rent'),
-         InlineKeyboardButton("📋 Số đang thuê", callback_data='menu_rent_list')],
-        [InlineKeyboardButton("💰 Số dư", callback_data='menu_balance'),
-         InlineKeyboardButton("💳 Nạp tiền", callback_data='menu_deposit')],
-        [InlineKeyboardButton("📜 Lịch sử", callback_data='menu_history'),
-         InlineKeyboardButton("👤 Tài khoản", callback_data='menu_profile')],
-        [InlineKeyboardButton("❓ Hướng dẫn", callback_data='menu_help')]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    # Lấy menu từ cache
+    reply_markup = get_cached_menu("main") or main_menu
     
     welcome_msg = (
         f"🎉 **Chào mừng {user.first_name} đến với Bot Thuê SMS!**\n\n"
@@ -192,12 +292,9 @@ async def start_command(update: Update, context: Context):
         f"• Chọn 'Số đang thuê' để xem các số đã thuê"
     )
     
-    await update.message.reply_text(
-        welcome_msg, 
-        reply_markup=reply_markup, 
-        parse_mode='Markdown'
-    )
+    await safe_send_message(update, welcome_msg, reply_markup)
 
+@retry_on_timeout(max_retries=2, delay=1)
 async def menu_command(update: Update, context: Context):
     """Hiển thị menu chính"""
     query = update.callback_query
@@ -208,62 +305,23 @@ async def menu_command(update: Update, context: Context):
     user = update.effective_user
     await sync_balance_with_render(user.id)
     
-    keyboard = [
-        [InlineKeyboardButton("📱 Thuê số", callback_data='menu_rent'),
-         InlineKeyboardButton("📋 Số đang thuê", callback_data='menu_rent_list')],
-        [InlineKeyboardButton("💰 Số dư", callback_data='menu_balance'),
-         InlineKeyboardButton("💳 Nạp tiền", callback_data='menu_deposit')],
-        [InlineKeyboardButton("📜 Lịch sử", callback_data='menu_history'),
-         InlineKeyboardButton("👤 Tài khoản", callback_data='menu_profile')],
-        [InlineKeyboardButton("❓ Hướng dẫn", callback_data='menu_help')]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    # Lấy menu từ cache
+    reply_markup = get_cached_menu("main") or main_menu
     
     text = "🎯 **MENU CHÍNH**\n\nChọn chức năng bạn muốn sử dụng:"
     
-    if query:
-        try:
-            await query.edit_message_text(
-                text, 
-                reply_markup=reply_markup, 
-                parse_mode='Markdown'
-            )
-        except Exception as e:
-            logger.error(f"Lỗi edit message: {e}")
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=text,
-                reply_markup=reply_markup,
-                parse_mode='Markdown'
-            )
-    else:
-        await update.message.reply_text(
-            text, 
-            reply_markup=reply_markup, 
-            parse_mode='Markdown'
-        )
+    await safe_send_message(update, text, reply_markup)
 
+@retry_on_timeout(max_retries=2, delay=1)
 async def cancel(update: Update, context: Context):
     """Hủy thao tác hiện tại"""
-    query = update.callback_query
     keyboard = [[InlineKeyboardButton("🔙 QUAY LẠI MENU", callback_data="menu_main")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     text = "❌ **ĐÃ HỦY THAO TÁC!**\n\nBạn có thể chọn chức năng khác."
     
-    if query:
-        await query.answer()
-        await query.edit_message_text(
-            text,
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
-        )
-    else:
-        await update.message.reply_text(
-            text,
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
-        )
+    await safe_send_message(update, text, reply_markup)
 
+@retry_on_timeout(max_retries=2, delay=1)
 async def help_command(update: Update, context: Context):
     """Hiển thị hướng dẫn chi tiết"""
     text = (
@@ -294,26 +352,16 @@ async def help_command(update: Update, context: Context):
     keyboard = [[InlineKeyboardButton("🔙 Quay lại menu", callback_data="menu_main")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    if update.callback_query:
-        await update.callback_query.edit_message_text(
-            text, 
-            reply_markup=reply_markup, 
-            parse_mode='Markdown'
-        )
-    else:
-        await update.message.reply_text(
-            text, 
-            reply_markup=reply_markup, 
-            parse_mode='Markdown'
-        )
+    await safe_send_message(update, text, reply_markup)
 
+@retry_on_timeout(max_retries=2, delay=1)
 async def check_command(update: Update, context: Context):
     """Lệnh kiểm tra trạng thái giao dịch thủ công"""
     try:
         if not context.args:
-            await update.message.reply_text(
-                "❌ **CÚ PHÁP SAI**\n\nVui lòng nhập: `/check MÃ_GD`\nVí dụ: `/check MANUAL_20260307153425`",
-                parse_mode='Markdown'
+            await safe_send_message(
+                update,
+                "❌ **CÚ PHÁP SAI**\n\nVui lòng nhập: `/check MÃ_GD`\nVí dụ: `/check MANUAL_20260307153425`"
             )
             return
         
@@ -350,45 +398,46 @@ async def check_command(update: Update, context: Context):
                             local_status = 'not_found'
                             local_balance = 0
                     
-                    await update.message.reply_text(
+                    await safe_send_message(
+                        update,
                         f"🔍 **KIỂM TRA GIAO DỊCH {code}**\n\n"
                         f"🌐 **Render:** {status_text}\n"
                         f"💻 **Local:** {local_status}\n"
                         f"💰 **Số tiền:** {data['amount']:,}đ\n"
                         f"🆔 **User ID:** {data['user_id']}\n"
                         f"💵 **Số dư hiện tại:** {local_balance:,}đ\n\n"
-                        f"{'✅ Giao dịch đã thành công!' if data['status'] == 'success' else '⏳ Vui lòng chờ xử lý...'}",
-                        parse_mode='Markdown'
+                        f"{'✅ Giao dịch đã thành công!' if data['status'] == 'success' else '⏳ Vui lòng chờ xử lý...'}"
                     )
                 else:
-                    await update.message.reply_text(
-                        f"❌ **KHÔNG TÌM THẤY**\n\nMã giao dịch `{code}` không tồn tại.",
-                        parse_mode='Markdown'
+                    await safe_send_message(
+                        update,
+                        f"❌ **KHÔNG TÌM THẤY**\n\nMã giao dịch `{code}` không tồn tại."
                     )
             else:
-                await update.message.reply_text(
-                    f"⚠️ **LỖI KẾT NỐI**\n\nKhông thể kiểm tra trạng thái.",
-                    parse_mode='Markdown'
+                await safe_send_message(
+                    update,
+                    f"⚠️ **LỖI KẾT NỐI**\n\nKhông thể kiểm tra trạng thái."
                 )
         except requests.exceptions.ConnectionError:
-            await update.message.reply_text(
-                "⚠️ **LỖI KẾT NỐI**\n\nKhông thể kết nối đến server Render.",
-                parse_mode='Markdown'
+            await safe_send_message(
+                update,
+                "⚠️ **LỖI KẾT NỐI**\n\nKhông thể kết nối đến server Render."
             )
         except Exception as e:
             logger.error(f"Lỗi check status: {e}")
-            await update.message.reply_text(
-                f"⚠️ **LỖI**\n\nKhông thể kiểm tra trạng thái.",
-                parse_mode='Markdown'
+            await safe_send_message(
+                update,
+                f"⚠️ **LỖI**\n\nKhông thể kiểm tra trạng thái."
             )
             
     except Exception as e:
         logger.error(f"Lỗi check_deposit_status: {e}")
-        await update.message.reply_text(
-            "⚠️ **LỖI XỬ LÝ**\n\nVui lòng thử lại sau.",
-            parse_mode='Markdown'
+        await safe_send_message(
+            update,
+            "⚠️ **LỖI XỬ LÝ**\n\nVui lòng thử lại sau."
         )
 
+@retry_on_timeout(max_retries=2, delay=1)
 async def balance_command(update: Update, context: Context):
     """Xem số dư tài khoản - CÓ ĐỒNG BỘ VỚI RENDER"""
     user = update.effective_user
@@ -401,10 +450,7 @@ async def balance_command(update: Update, context: Context):
         
         if not db_user:
             text = "❌ KHÔNG TÌM THẤY TÀI KHOẢN\n\nVui lòng gửi /start để đăng ký."
-            if update.callback_query:
-                await update.callback_query.edit_message_text(text)
-            else:
-                await update.message.reply_text(text)
+            await safe_send_message(update, text)
             return
         
         balance = db_user.balance
@@ -429,19 +475,9 @@ async def balance_command(update: Update, context: Context):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        if update.callback_query:
-            await update.callback_query.edit_message_text(
-                text, 
-                reply_markup=reply_markup, 
-                parse_mode='Markdown'
-            )
-        else:
-            await update.message.reply_text(
-                text, 
-                reply_markup=reply_markup, 
-                parse_mode='Markdown'
-            )
+        await safe_send_message(update, text, reply_markup)
 
+@retry_on_timeout(max_retries=2, delay=1)
 async def history_command(update: Update, context: Context):
     """Xem lịch sử giao dịch"""
     user = update.effective_user
@@ -453,10 +489,10 @@ async def history_command(update: Update, context: Context):
         if not rentals:
             keyboard = [[InlineKeyboardButton("🔙 QUAY LẠI MENU", callback_data="menu_main")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            await update.message.reply_text(
+            await safe_send_message(
+                update,
                 "📭 **Bạn chưa có giao dịch nào**",
-                reply_markup=reply_markup,
-                parse_mode='Markdown'
+                reply_markup
             )
             return
         
@@ -478,8 +514,9 @@ async def history_command(update: Update, context: Context):
         keyboard = [[InlineKeyboardButton("🔙 QUAY LẠI MENU", callback_data="menu_main")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+        await safe_send_message(update, text, reply_markup)
 
+@retry_on_timeout(max_retries=2, delay=1)
 async def cancel_command(update: Update, context: Context):
     """Hủy thao tác hiện tại"""
     # Xóa user_data
@@ -488,10 +525,10 @@ async def cancel_command(update: Update, context: Context):
     keyboard = [[InlineKeyboardButton("🔙 QUAY LẠI MENU", callback_data="menu_main")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await update.message.reply_text(
+    await safe_send_message(
+        update,
         "❌ **ĐÃ HỦY THAO TÁC**\n\nBạn có thể bắt đầu lại từ menu.",
-        reply_markup=reply_markup,
-        parse_mode='Markdown'
+        reply_markup
     )
 
 # Import app từ bot - để cuối file tránh circular import

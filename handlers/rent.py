@@ -10,6 +10,7 @@ import logging
 import time
 import asyncio
 from typing import Dict
+
 VN_TZ = timezone(timedelta(hours=7))
 def get_vn_time():
     """Lấy thời gian Việt Nam hiện tại"""
@@ -29,11 +30,73 @@ networks_cache_time = 0
 # Dictionary để lưu trữ các task auto-check OTP
 auto_check_tasks: Dict[int, asyncio.Task] = {}
 
+# ==================== HÀM TIỆN ÍCH TỐI ƯU ====================
+async def safe_answer_callback(query, text=None, show_alert=False):
+    """Answer callback an toàn"""
+    try:
+        await query.answer(text=text, show_alert=show_alert, cache_time=0)
+    except Exception as e:
+        logger.debug(f"Answer callback error: {e}")
+
+async def safe_edit_message(query, text, reply_markup=None, parse_mode='Markdown', max_retries=2):
+    """Sửa tin nhắn an toàn, tự động retry"""
+    for attempt in range(max_retries):
+        try:
+            await query.edit_message_text(
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode
+            )
+            return True
+        except Exception as e:
+            if attempt == max_retries - 1:
+                logger.error(f"Edit message failed: {e}")
+                return False
+            await asyncio.sleep(0.5)
+    return False
+
+async def safe_send_message(context, chat_id, text, reply_markup=None, parse_mode='Markdown'):
+    """Gửi tin nhắn mới an toàn"""
+    try:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Send message failed: {e}")
+        return False
+
+async def safe_delete_message(message):
+    """Xóa tin nhắn an toàn"""
+    try:
+        await message.delete()
+    except Exception as e:
+        logger.debug(f"Delete message failed: {e}")
+
+# ==================== HÀM CACHE ====================
+def get_cached_services():
+    """Lấy services từ cache"""
+    global services_cache, services_cache_time
+    if services_cache and time.time() - services_cache_time < 300:
+        return services_cache
+    return None
+
+def get_cached_networks():
+    """Lấy networks từ cache"""
+    global networks_cache, networks_cache_time
+    if networks_cache and time.time() - networks_cache_time < 300:
+        return networks_cache
+    return None
+
+# ==================== HÀM GỐC (GIỮ NGUYÊN) ====================
 async def delete_previous_menu(update: Update, context: Context):
     """Xóa menu trước đó để tránh nhiều menu chồng lên nhau"""
     try:
         if update.callback_query and update.callback_query.message:
-            await update.callback_query.message.delete()
+            await safe_delete_message(update.callback_query.message)
     except Exception as e:
         logger.error(f"Lỗi xóa menu cũ: {e}")
 
@@ -41,12 +104,14 @@ async def get_services():
     """Lấy danh sách dịch vụ từ API"""
     global services_cache, services_cache_time
     
-    if services_cache and time.time() - services_cache_time < 300:
-        return services_cache
+    # Kiểm tra cache trước
+    cached = get_cached_services()
+    if cached:
+        return cached
     
     try:
         url = f"{BASE_URL}/service/get_service_by_api_key?api_key={API_KEY}"
-        response = requests.get(url)
+        response = requests.get(url, timeout=10)
         data = response.json()
         
         if data.get('status') == 200:
@@ -64,12 +129,14 @@ async def get_networks():
     """Lấy danh sách nhà mạng từ API"""
     global networks_cache, networks_cache_time
     
-    if networks_cache and time.time() - networks_cache_time < 300:
-        return networks_cache
+    # Kiểm tra cache trước
+    cached = get_cached_networks()
+    if cached:
+        return cached
     
     try:
         url = f"{BASE_URL}/network/get-network-by-api-key?api_key={API_KEY}"
-        response = requests.get(url)
+        response = requests.get(url, timeout=10)
         data = response.json()
         
         if data.get('status') == 200:
@@ -87,7 +154,7 @@ async def get_account_info():
     """Lấy thông tin tài khoản API"""
     try:
         url = f"{BASE_URL}/yourself/information-by-api-key?api_key={API_KEY}"
-        response = requests.get(url)
+        response = requests.get(url, timeout=10)
         data = response.json()
         if data.get('status') == 200:
             return data.get('data', {})
@@ -100,6 +167,10 @@ async def rent_command(update: Update, context: Context):
     """Hiển thị danh sách dịch vụ (đã ẩn số dư API)"""
     logger.info("📱 rent_command được gọi")
     
+    # Answer ngay để chống lag
+    if update.callback_query:
+        await safe_answer_callback(update.callback_query, "📱 Đang tải...")
+    
     # Xóa menu cũ trước khi hiển thị menu mới
     await delete_previous_menu(update, context)
     
@@ -109,11 +180,7 @@ async def rent_command(update: Update, context: Context):
         db_user = User.query.filter_by(user_id=user.id).first()
         if db_user and db_user.is_banned:
             text = "❌ **TÀI KHOẢN CỦA BẠN ĐÃ BỊ KHÓA**\n\nVui lòng liên hệ admin để biết thêm chi tiết."
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=text,
-                parse_mode='Markdown'
-            )
+            await safe_send_message(context, update.effective_chat.id, text)
             return
     
     # Hiển thị trạng thái đang tải
@@ -206,7 +273,7 @@ async def rent_command(update: Update, context: Context):
 async def rent_service_callback(update: Update, context: Context):
     """Xử lý khi chọn dịch vụ"""
     query = update.callback_query
-    await query.answer()
+    await safe_answer_callback(query)
     
     try:
         data = query.data.split('_')
@@ -216,7 +283,7 @@ async def rent_service_callback(update: Update, context: Context):
         final_price = original_price + 1000
     except Exception as e:
         logger.error(f"Lỗi parse data: {e}")
-        await query.edit_message_text("❌ **LỖI DỮ LIỆU**\n\nVui lòng chọn lại dịch vụ.")
+        await safe_edit_message(query, "❌ **LỖI DỮ LIỆU**\n\nVui lòng chọn lại dịch vụ.")
         return
     
     # Lưu thông tin dịch vụ đã chọn
@@ -228,10 +295,7 @@ async def rent_service_callback(update: Update, context: Context):
     }
     
     # Xóa menu hiện tại
-    try:
-        await query.message.delete()
-    except:
-        pass
+    await safe_delete_message(query.message)
     
     # Hiển thị trạng thái đang tải
     loading_msg = await context.bot.send_message(
@@ -285,7 +349,7 @@ async def rent_service_callback(update: Update, context: Context):
 async def rent_network_callback(update: Update, context: Context):
     """Xử lý khi chọn nhà mạng"""
     query = update.callback_query
-    await query.answer()
+    await safe_answer_callback(query)
     
     try:
         data = query.data.split('_')
@@ -293,7 +357,7 @@ async def rent_network_callback(update: Update, context: Context):
         network_name = data[3]
     except Exception as e:
         logger.error(f"Lỗi parse network: {e}")
-        await query.edit_message_text("❌ **LỖI DỮ LIỆU**\n\nVui lòng chọn lại.")
+        await safe_edit_message(query, "❌ **LỖI DỮ LIỆU**\n\nVui lòng chọn lại.")
         return
     
     rent_info = context.user_data.get('rent', {})
@@ -303,7 +367,7 @@ async def rent_network_callback(update: Update, context: Context):
     original_price = rent_info.get('original_price')
     
     if not service_id or not final_price:
-        await query.edit_message_text("❌ **LỖI!**\n\nVui lòng chọn lại dịch vụ.")
+        await safe_edit_message(query, "❌ **LỖI!**\n\nVui lòng chọn lại dịch vụ.")
         return
     
     user = update.effective_user
@@ -312,7 +376,7 @@ async def rent_network_callback(update: Update, context: Context):
         current_balance = db_user.balance if db_user else 0
     
     # Xóa menu hiện tại
-    await query.message.delete()
+    await safe_delete_message(query.message)
     
     keyboard = [
         [InlineKeyboardButton("✅ XÁC NHẬN THUÊ", callback_data=f"rent_confirm_{service_id}_{final_price}_{network_id}")],
@@ -332,17 +396,12 @@ async def rent_network_callback(update: Update, context: Context):
         f"❓ **Xác nhận thuê số?**"
     )
     
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text=text,
-        reply_markup=reply_markup,
-        parse_mode='Markdown'
-    )
+    await safe_send_message(context, update.effective_chat.id, text, reply_markup)
 
 async def rent_confirm_callback(update: Update, context: Context):
     """Xác nhận thuê số - Gọi API lấy số (ĐÃ FIX LỖI CỘNG TRỪ KHI THUÊ LIÊN TỤC)"""
     query = update.callback_query
-    await query.answer()
+    await safe_answer_callback(query, "⏳ Đang xử lý...")
     
     try:
         data = query.data.split('_')
@@ -351,12 +410,12 @@ async def rent_confirm_callback(update: Update, context: Context):
         network_id = data[4]
     except Exception as e:
         logger.error(f"Lỗi parse confirm: {e}")
-        await query.edit_message_text("❌ **LỖI DỮ LIỆU**\n\nVui lòng chọn lại.")
+        await safe_edit_message(query, "❌ **LỖI DỮ LIỆU**\n\nVui lòng chọn lại.")
         return
     
     # ===== KIỂM TRA API KEY =====
     if not API_KEY or not BASE_URL:
-        await query.edit_message_text("❌ **LỖI CẤU HÌNH**\n\nVui lòng liên hệ admin.")
+        await safe_edit_message(query, "❌ **LỖI CẤU HÌNH**\n\nVui lòng liên hệ admin.")
         return
     
     user = update.effective_user
@@ -368,7 +427,7 @@ async def rent_confirm_callback(update: Update, context: Context):
         logger.info(f"🔍 [BẮT ĐẦU] User {user.id} - Số dư từ DB: {db_user.balance if db_user else 0}đ")
         
         if not db_user:
-            await query.edit_message_text("❌ **KHÔNG TÌM THẤY TÀI KHOẢN**\n\nVui lòng gửi /start để đăng ký.")
+            await safe_edit_message(query, "❌ **KHÔNG TÌM THẤY TÀI KHOẢN**\n\nVui lòng gửi /start để đăng ký.")
             return
         
         # ===== KIỂM TRA GIAO DỊCH GẦN ĐÂY (CHỐNG SPAM) =====
@@ -379,9 +438,8 @@ async def rent_confirm_callback(update: Update, context: Context):
         
         if recent_transactions > 3:
             logger.warning(f"⚠️ User {user.id} đang thuê quá nhanh: {recent_transactions} lần/10s")
-            await query.edit_message_text(
-                "⚠️ **BẠN ĐANG THUÊ QUÁ NHANH**\n\nVui lòng chờ 10 giây giữa các lần thuê.",
-                parse_mode='Markdown'
+            await safe_edit_message(query,
+                "⚠️ **BẠN ĐANG THUÊ QUÁ NHANH**\n\nVui lòng chờ 10 giây giữa các lần thuê."
             )
             return
         
@@ -393,22 +451,18 @@ async def rent_confirm_callback(update: Update, context: Context):
                 [InlineKeyboardButton("🔙 QUAY LẠI", callback_data="menu_rent")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            await query.edit_message_text(
+            await safe_edit_message(query,
                 f"❌ **SỐ DƯ KHÔNG ĐỦ!**\n\n"
                 f"• **Cần:** {final_price:,}đ\n"
                 f"• **Có:** {db_user.balance:,}đ\n"
                 f"• **Thiếu:** {shortage:,}đ\n\n"
                 f"Vui lòng nạp thêm tiền để tiếp tục.",
-                reply_markup=reply_markup,
-                parse_mode='Markdown'
+                reply_markup
             )
             return
         
         # Xóa menu hiện tại (có bắt lỗi)
-        try:
-            await query.message.delete()
-        except Exception as e:
-            logger.warning(f"Không thể xóa message: {e}")
+        await safe_delete_message(query.message)
         
         loading_msg = await context.bot.send_message(
             chat_id=update.effective_chat.id,
@@ -672,7 +726,7 @@ async def rent_confirm_callback(update: Update, context: Context):
 async def rent_check_callback(update: Update, context: Context):
     """Kiểm tra OTP thủ công - GỬI CẢ TEXT VÀ AUDIO"""
     query = update.callback_query
-    await query.answer()
+    await safe_answer_callback(query)
     
     try:
         data = query.data.split('_')
@@ -820,6 +874,37 @@ async def auto_check_otp_task(bot, chat_id: int, otp_id: str, rental_id: int, us
     
     try:
         while check_count < max_checks and not processed:
+        # === KIỂM TRA THỜI GIAN HẾT HẠN ===
+            with app.app_context():
+                rental = Rental.query.filter_by(id=rental_id).with_for_update().first()
+                if rental and rental.status == 'waiting' and not rental.refunded:
+                    now = datetime.now()
+                    if now > rental.expires_at:
+                        logger.info(f"⏰ Rental {rental_id} đã hết hạn (timeout), tiến hành hoàn tiền")
+                        
+                        refund = rental.price_charged
+                        user = User.query.filter_by(user_id=rental.user_id).with_for_update().first()
+                        if user:
+                            old_balance = user.balance
+                            user.balance += refund
+                            rental.status = 'expired'
+                            rental.refunded = True
+                            rental.refund_amount = refund
+                            rental.refunded_at = now
+                            db.session.commit()
+                            
+                            await bot.send_message(
+                                chat_id=chat_id,
+                                text=f"⏰ **SỐ ĐÃ HẾT HẠN**\n\n"
+                                    f"📞 Số `{phone}` đã hết hạn.\n"
+                                    f"💰 **Đã tự động hoàn lại {refund:,}đ!**\n"
+                                    f"💵 **Số dư mới:** {user.balance:,}đ",
+                                parse_mode='Markdown'
+                            )
+                            
+                            if rental_id in auto_check_tasks:
+                                del auto_check_tasks[rental_id]
+                            return
             if asyncio.current_task().cancelled():
                 logger.info(f"🛑 Task {rental_id} bị hủy")
                 return
@@ -1062,18 +1147,48 @@ async def auto_check_otp_task(bot, chat_id: int, otp_id: str, rental_id: int, us
             # ===== CHỜ 5 GIÂY TRƯỚC LẦN KIỂM TRA TIẾP THEO =====
             await asyncio.sleep(5)
         
-        # ===== HẾT 60 LẦN CHECK (5 PHÚT) =====
+        # ===== HẾT 120 LẦN CHECK (10 PHÚT) =====
         if not processed:
             with app.app_context():
-                # Kiểm tra lần cuối trước khi thông báo hết hạn
-                rental = Rental.query.get(rental_id)
+                # Lấy rental với khóa để hoàn tiền
+                rental = Rental.query.filter_by(id=rental_id).with_for_update().first()
+                
                 if rental and rental.status == 'waiting' and not rental.refunded:
-                    await bot.send_message(
-                        chat_id=chat_id,
-                        text=f"⏰ **ĐÃ HẾT THỜI GIAN CHỜ OTP**\n\nSố `{phone}` đã hết hạn.\n"
-                             f"❌ Vui lòng hủy thủ công để được hoàn tiền!",
-                        parse_mode='Markdown'
-                    )
+                    user = User.query.filter_by(user_id=rental.user_id).with_for_update().first()
+                    
+                    if user:
+                        refund = rental.price_charged  # DÙNG price_charged, KHÔNG dùng cost
+                        old_balance = user.balance
+                        
+                        # HOÀN TIỀN NGAY LẬP TỨC
+                        user.balance += refund
+                        rental.status = 'expired'
+                        rental.refunded = True
+                        rental.refund_amount = refund
+                        rental.refunded_at = datetime.now()
+                        
+                        db.session.commit()
+                        
+                        logger.info(f"💰 AUTO HOÀN SAU KHI HẾT CHECK: rental {rental_id}")
+                        logger.info(f"   {old_balance}đ → {user.balance}đ (+{refund}đ)")
+                        
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=f"⏰ **SỐ ĐÃ HẾT HẠN**\n\n"
+                                f"📞 Số `{phone}` đã hết thời gian chờ OTP.\n"
+                                f"💰 **ĐÃ TỰ ĐỘNG HOÀN LẠI {refund:,}Đ!**\n"
+                                f"💵 **Số dư mới:** {user.balance:,}đ",
+                            parse_mode='Markdown'
+                        )
+                    else:
+                        # Không tìm thấy user - vẫn thông báo nhưng không hoàn được
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=f"⏰ **SỐ ĐÃ HẾT HẠN**\n\n"
+                                f"📞 Số `{phone}` đã hết thời gian chờ OTP.\n"
+                                f"❌ **LỖI: Không tìm thấy user để hoàn tiền!**",
+                            parse_mode='Markdown'
+                        )
             
             if rental_id in auto_check_tasks:
                 del auto_check_tasks[rental_id]
@@ -1087,7 +1202,7 @@ async def auto_check_otp_task(bot, chat_id: int, otp_id: str, rental_id: int, us
 async def rent_view_callback(update: Update, context: Context):
     """Xem chi tiết số đã thuê"""
     query = update.callback_query
-    await query.answer()
+    await safe_answer_callback(query)
     
     try:
         rental_id = int(query.data.split('_')[2])
@@ -1152,7 +1267,7 @@ async def rent_view_callback(update: Update, context: Context):
 async def rent_reuse_callback(update: Update, context: Context):
     """Thuê lại số đã từng thuê thành công"""
     query = update.callback_query
-    await query.answer()
+    await safe_answer_callback(query)
     
     try:
         data = query.data.split('_')
@@ -1272,7 +1387,7 @@ async def rent_reuse_callback(update: Update, context: Context):
 async def rent_cancel_callback(update: Update, context: Context):
     """Hủy số - SIÊU BẢO VỆ CHỐNG CỘNG SAI (ĐÃ CẬP NHẬT)"""
     query = update.callback_query
-    await query.answer()
+    await safe_answer_callback(query)
     
     try:
         data = query.data.split('_')
@@ -1418,7 +1533,7 @@ async def rent_cancel_callback(update: Update, context: Context):
 async def rent_list_callback(update: Update, context: Context):
     """Hiển thị danh sách số đang thuê - CÓ NÚT HỦY CHO SỐ CHỜ OTP"""
     query = update.callback_query
-    await query.answer()
+    await safe_answer_callback(query)
     
     user = update.effective_user
     
