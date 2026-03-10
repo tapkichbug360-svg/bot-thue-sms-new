@@ -44,6 +44,14 @@ def setup_sepay_webhook(app):
             if account_number != MB_ACCOUNT:
                 return jsonify({"success": True}), 200
             
+            # ===== KIỂM TRA SỐ TIỀN TỐI THIỂU =====
+            if amount < 20000:
+                logger.warning(f"⚠️ TỪ CHỐI GIAO DỊCH DƯỚI 20,000đ: {amount}đ")
+                return jsonify({
+                    "success": False,
+                    "error": "Số tiền tối thiểu là 20,000đ"
+                }), 400
+            
             # Tìm mã GD
             transaction_code = None
             match = re.search(r'NAP\s*([A-Z0-9]{5,8})', content)
@@ -62,16 +70,22 @@ def setup_sepay_webhook(app):
                 return jsonify({"success": True}), 200
             
             with app.app_context():
-                # Tìm giao dịch
-                transaction = Transaction.query.filter_by(
+                # ===== KIỂM TRA MÃ GD ĐÃ TỒN TẠI CHƯA =====
+                existing_transaction = Transaction.query.filter_by(
                     transaction_code=transaction_code
                 ).first()
+                
+                if existing_transaction:
+                    logger.warning(f"⚠️ MÃ GD {transaction_code} ĐÃ ĐƯỢC SỬ DỤNG! Từ chối nạp lần 2")
+                    return jsonify({
+                        "success": False,
+                        "error": "Mã giao dịch đã được sử dụng"
+                    }), 400
                 
                 # ===== XÁC ĐỊNH USER - ÁP DỤNG CHO TẤT CẢ USER =====
                 target_user = None
                 
-                # CÁCH 1: Tìm user_id trong nội dung (ƯU TIÊN NHẤT - CHO MỌI USER)
-                # Format: "tu 123456789", "tu123456789", "từ 123456789"
+                # CÁCH 1: Tìm user_id trong nội dung (ƯU TIÊN NHẤT)
                 user_match = re.search(r'tu[_\s]*(\d+)', content, re.IGNORECASE)
                 if user_match:
                     found_user_id = int(user_match.group(1))
@@ -79,7 +93,7 @@ def setup_sepay_webhook(app):
                     if target_user:
                         logger.info(f"✅ Cách 1: Tìm thấy user {target_user.user_id} từ nội dung")
                 
-                # CÁCH 2: Tìm user_id dạng UID (CHO MỌI USER)
+                # CÁCH 2: Tìm user_id dạng UID
                 if not target_user:
                     uid_match = re.search(r'UID(\d+)', content, re.IGNORECASE)
                     if uid_match:
@@ -88,7 +102,7 @@ def setup_sepay_webhook(app):
                         if target_user:
                             logger.info(f"✅ Cách 2: Tìm thấy user {target_user.user_id} từ UID")
                 
-                # CÁCH 3: Tìm user_id dạng ID (CHO MỌI USER)
+                # CÁCH 3: Tìm user_id dạng ID
                 if not target_user:
                     id_match = re.search(r'ID(\d+)', content, re.IGNORECASE)
                     if id_match:
@@ -97,17 +111,11 @@ def setup_sepay_webhook(app):
                         if target_user:
                             logger.info(f"✅ Cách 3: Tìm thấy user {target_user.user_id} từ ID")
                 
-                # CÁCH 4: Từ giao dịch có sẵn (CHO MỌI USER)
-                if not target_user and transaction:
-                    target_user = User.query.get(transaction.user_id)
-                    if target_user:
-                        logger.info(f"✅ Cách 4: Tìm thấy user {target_user.user_id} từ giao dịch")
-                
-                # CÁCH 5: Tìm user gần đây nhất (FALLBACK CHO MỌI USER)
+                # CÁCH 4: Tìm user gần đây nhất (FALLBACK)
                 if not target_user:
                     target_user = User.query.order_by(User.last_active.desc()).first()
                     if target_user:
-                        logger.warning(f"⚠️ Cách 5: Dùng user gần đây {target_user.user_id} (FALLBACK)")
+                        logger.warning(f"⚠️ Cách 4: Dùng user gần đây {target_user.user_id} (FALLBACK)")
                 
                 # NẾU KHÔNG TÌM THẤY USER -> TỪ CHỐI GIAO DỊCH
                 if not target_user:
@@ -117,25 +125,19 @@ def setup_sepay_webhook(app):
                         "error": "User not found"
                     }), 404
                 
-                # Xử lý giao dịch
-                if not transaction:
-                    transaction = Transaction(
-                        user_id=target_user.id,
-                        amount=amount,
-                        type='deposit',
-                        status='success',
-                        transaction_code=transaction_code,
-                        description=f"NAP qua SePay: {content}",
-                        created_at=current_time,
-                        updated_at=current_time
-                    )
-                    db.session.add(transaction)
-                    logger.info(f"✅ TẠO GIAO DỊCH MỚI CHO USER {target_user.user_id}: {transaction_code}")
-                else:
-                    logger.info(f"🔄 Giao dịch {transaction_code} đã tồn tại, cộng thêm {amount}đ cho user {target_user.user_id}")
-                    transaction.amount += amount
-                    transaction.status = 'success'
-                    transaction.updated_at = current_time
+                # Tạo giao dịch mới
+                transaction = Transaction(
+                    user_id=target_user.id,
+                    amount=amount,
+                    type='deposit',
+                    status='success',
+                    transaction_code=transaction_code,
+                    description=f"NAP qua SePay: {content}",
+                    created_at=current_time,
+                    updated_at=current_time
+                )
+                db.session.add(transaction)
+                logger.info(f"✅ TẠO GIAO DỊCH MỚI CHO USER {target_user.user_id}: {transaction_code}")
                 
                 # CỘNG TIỀN
                 old_balance = target_user.balance
