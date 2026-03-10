@@ -8,6 +8,7 @@ import re
 import asyncio
 import hashlib
 from telegram import Bot
+import requests  # THÊM IMPORT requests
 
 logger = logging.getLogger(__name__)
 
@@ -17,10 +18,29 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 
 telegram_bot = Bot(token=BOT_TOKEN) if BOT_TOKEN else None
 
-async def send_telegram_notification(chat_id, message):
-    # TẠM THỜI TẮT TRÊN RENDER - ĐỂ LOCAL XỬ LÝ
-    logger.info(f"⏭️ BỎ QUA GỬI TELEGRAM TRÊN RENDER CHO USER {chat_id}")
-    return
+# ===== HÀM GỬI TELEGRAM ĐỒNG BỘ =====
+def send_telegram_sync(chat_id, message):
+    """Gửi Telegram đồng bộ - KHÔNG CẦN ASYNC"""
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        payload = {
+            'chat_id': chat_id,
+            'text': message,
+            'parse_mode': 'Markdown'
+        }
+        
+        response = requests.post(url, json=payload, timeout=10)
+        
+        if response.status_code == 200:
+            logger.info(f"📨 Đã gửi Telegram cho user {chat_id}")
+            return True
+        else:
+            logger.warning(f"⚠️ Telegram lỗi {response.status_code}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"❌ Lỗi gửi Telegram: {e}")
+        return False
 
 def setup_sepay_webhook(app):
     @app.route('/webhook/sepay', methods=['POST'])
@@ -146,7 +166,26 @@ def setup_sepay_webhook(app):
 
                 logger.info(f"✅ CẬP NHẬT THÀNH CÔNG CHO USER {target_user.user_id}!")
                 logger.info(f"💰 {old_balance}đ → {target_user.balance}đ (+{amount}đ)")
-                logger.info(f"📌 Giao dịch {transaction_code} sẽ được local gửi thông báo sau khi đồng bộ")
+                
+                # ===== GỬI TELEGRAM NGAY LẬP TỨC =====
+                try:
+                    current_time_str = current_time.strftime('%H:%M:%S %d/%m/%Y')
+                    message = (
+                        f"💰 **NẠP TIỀN THÀNH CÔNG!**\n\n"
+                        f"• **Số tiền:** +{amount:,}đ\n"
+                        f"• **Số dư mới:** {target_user.balance:,}đ\n"
+                        f"• **Mã GD:** `{transaction_code}`\n"
+                        f"• **Thời gian:** {current_time_str}"
+                    )
+                    
+                    # Gửi Telegram đồng bộ
+                    send_telegram_sync(target_user.user_id, message)
+                    logger.info(f"📨 ĐÃ GỬI TELEGRAM CHO USER {target_user.user_id}")
+                    
+                except Exception as e:
+                    logger.error(f"❌ Lỗi gửi Telegram: {e}")
+                
+                logger.info(f"📌 Giao dịch {transaction_code} hoàn tất")
 
                 return jsonify({
                     "success": True,
