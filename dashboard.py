@@ -1671,20 +1671,36 @@ def add_money():
         db.session.add(transaction)
         db.session.commit()
         
-        # ===== QUAN TRỌNG: PUSH LÊN RENDER NGAY =====
+        # ===== PUSH LÊN RENDER NGAY =====
         try:
+            RENDER_URL = os.getenv('RENDER_URL', 'https://bot-thue-sms-new.onrender.com')
             push_data = {
                 'user_id': user.user_id,
                 'balance': user.balance,
                 'username': user.username or f"user_{user.user_id}"
             }
-            # Gửi lên Render
-            requests.post(
-                f"{os.getenv('RENDER_URL', 'https://bot-thue-sms-new.onrender.com')}/api/update-balance",
+            
+            # DÙNG API sync-bidirectional (ĐÃ HOẠT ĐỘNG)
+            response = requests.post(
+                f"{RENDER_URL}/api/sync-bidirectional",
                 json=push_data,
                 timeout=5
             )
-            logger.info(f"✅ Đã push balance {user.balance}đ lên Render cho user {user_id}")
+            
+            if response.status_code == 200:
+                logger.info(f"✅ Đã push balance {user.balance}đ lên Render qua sync-bidirectional")
+            else:
+                # Thử API dự phòng
+                response2 = requests.post(
+                    f"{RENDER_URL}/api/force-sync-user",
+                    json={'user_id': user.user_id},
+                    timeout=5
+                )
+                if response2.status_code == 200:
+                    logger.info(f"✅ Đã push qua force-sync-user")
+                else:
+                    logger.warning(f"⚠️ Không thể push lên Render, code: {response.status_code}")
+                    
         except Exception as e:
             logger.error(f"❌ Lỗi push lên Render: {e}")
         
@@ -1736,20 +1752,36 @@ def deduct_money():
         db.session.add(transaction)
         db.session.commit()
         
-        # ===== QUAN TRỌNG: PUSH LÊN RENDER NGAY =====
+        # ===== PUSH LÊN RENDER NGAY (ĐÃ SỬA) =====
         try:
+            RENDER_URL = os.getenv('RENDER_URL', 'https://bot-thue-sms-new.onrender.com')
             push_data = {
                 'user_id': user.user_id,
                 'balance': user.balance,
                 'username': user.username or f"user_{user.user_id}"
             }
-            # Gửi lên Render
-            requests.post(
-                f"{os.getenv('RENDER_URL', 'https://bot-thue-sms-new.onrender.com')}/api/update-balance",
+            
+            # DÙNG sync-bidirectional (GIỐNG add_money)
+            response = requests.post(
+                f"{RENDER_URL}/api/sync-bidirectional",
                 json=push_data,
                 timeout=5
             )
-            logger.info(f"✅ Đã push balance {user.balance}đ lên Render cho user {user_id}")
+            
+            if response.status_code == 200:
+                logger.info(f"✅ Đã push balance {user.balance}đ lên Render qua sync-bidirectional")
+            else:
+                # Thử API dự phòng
+                response2 = requests.post(
+                    f"{RENDER_URL}/api/force-sync-user",
+                    json={'user_id': user.user_id},
+                    timeout=5
+                )
+                if response2.status_code == 200:
+                    logger.info(f"✅ Đã push qua force-sync-user")
+                else:
+                    logger.warning(f"⚠️ Không thể push lên Render, code: {response.status_code}")
+                    
         except Exception as e:
             logger.error(f"❌ Lỗi push lên Render: {e}")
         
