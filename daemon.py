@@ -331,29 +331,80 @@ class UserSyncDaemon:
     
     # ==================== KÉO DỮ LIỆU TỪ RENDER VỀ ====================
     def pull_user_from_render(self, user_id):
-        """Kéo user từ Render về - DÙNG sync-bidirectional"""
+        """
+        KÉO USER TỪ RENDER VỀ - CẬP NHẬT BALANCE NẾU KHÁC
+        """
         try:
+            self.log(f"📥 Đang kéo user {user_id} từ Render về...", "INFO")
+            
+            # Gọi API force-sync-user để lấy thông tin user
             response = requests.post(
+                f"{RENDER_URL}/api/force-sync-user",
+                json={'user_id': user_id},
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                render_balance = data.get('balance')
+                
+                if render_balance is not None:
+                    local_balance = self.get_user_balance(user_id)
+                    
+                    if render_balance != local_balance:
+                        # CẬP NHẬT LOCAL
+                        self.update_local_balance(user_id, render_balance)
+                        diff = render_balance - local_balance
+                        self.log(f"✅ User {user_id}: {local_balance}đ → {render_balance}đ ({diff:+,}đ)", "SUCCESS")
+                        
+                        # Gửi thông báo nếu cần
+                        try:
+                            if diff > 0:
+                                self.send_telegram_notification(user_id, render_balance, diff, "NAP")
+                            else:
+                                self.send_telegram_notification(user_id, render_balance, diff, "TIÊU")
+                        except:
+                            pass
+                    else:
+                        self.log(f"✅ User {user_id}: Đã đồng bộ {local_balance}đ", "SUCCESS")
+                    return True
+                else:
+                    self.log(f"⚠️ force-sync-user không trả về balance", "WARNING")
+            else:
+                self.log(f"⚠️ force-sync-user lỗi {response.status_code}", "WARNING")
+                
+            # Nếu force-sync-user không hoạt động, thử sync-bidirectional
+            self.log(f"🔄 Thử sync-bidirectional như dự phòng...", "INFO")
+            response2 = requests.post(
                 f"{RENDER_URL}/api/sync-bidirectional",
                 json={
                     'user_id': user_id,
                     'balance': self.get_user_balance(user_id),
                     'username': f"user_{user_id}"
                 },
-                timeout=self.pull_timeout
+                timeout=5
             )
             
-            if response.status_code == 200:
-                self.update_stats('pull_success')
-                return True
+            if response2.status_code == 200:
+                data2 = response2.json()
+                # Nếu API trả về balance
+                if data2.get('direct_update'):
+                    render_balance = data2.get('new_balance')
+                    if render_balance:
+                        local_balance = self.get_user_balance(user_id)
+                        if render_balance != local_balance:
+                            self.update_local_balance(user_id, render_balance)
+                            self.log(f"✅ User {user_id}: Cập nhật từ sync-bidirectional", "SUCCESS")
+                        return True
+                else:
+                    self.log(f"✅ User {user_id}: Giữ nguyên {self.get_user_balance(user_id)}đ", "SUCCESS")
+                    return True
             else:
-                self.log(f"⚠️ Pull user {user_id} lỗi {response.status_code}", "WARNING")
-                self.update_stats('pull_failed')
+                self.log(f"⚠️ sync-bidirectional lỗi {response2.status_code}", "WARNING")
                 return False
                 
         except Exception as e:
             self.log(f"❌ Lỗi pull user {user_id}: {e}", "ERROR")
-            self.update_stats('pull_failed')
             return False
     
     def pull_user_batch(self, users):
