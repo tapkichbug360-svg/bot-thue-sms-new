@@ -1645,6 +1645,11 @@ def add_money():
     amount = request.form.get('amount', type=int)
     reason = request.form.get('reason', 'Cộng tiền thủ công')
     
+    print(f"\n🔍 DEBUG - Cộng tiền thủ công:")
+    print(f"  User ID: {user_id}")
+    print(f"  Amount: {amount}đ")
+    print(f"  Reason: {reason}")
+    
     if not user_id or not amount or amount < 1000:
         return jsonify({'success': False, 'error': 'Thông tin không hợp lệ'})
     
@@ -1654,7 +1659,10 @@ def add_money():
             return jsonify({'success': False, 'error': f'Không tìm thấy user {user_id}'})
         
         old_balance = user.balance
+        print(f"  Balance cũ trong DB: {old_balance}đ")
+        
         user.balance += amount
+        print(f"  Balance mới trong DB: {user.balance}đ")
         
         transaction_code = f"ADD_{datetime.now().strftime('%Y%m%d%H%M%S')}_{secrets.token_hex(3).upper()}"
         
@@ -1670,17 +1678,20 @@ def add_money():
         
         db.session.add(transaction)
         db.session.commit()
+        print(f"  ✅ Đã commit vào database local")
         
         # ===== PUSH LÊN RENDER NGAY =====
         try:
-            RENDER_URL = "https://bot-thue-sms-new.onrender.com"  # Cứng hóa URL đúng
+            RENDER_URL = "https://bot-thue-sms-new.onrender.com"
             push_data = {
                 'user_id': user.user_id,
                 'balance': user.balance,
                 'username': user.username or f"user_{user.user_id}"
             }
             
-            # DÙNG API sync-bidirectional (ĐÃ HOẠT ĐỘNG)
+            print(f"  📤 Push lên Render: {push_data}")
+            
+            # DÙNG API sync-bidirectional
             response = requests.post(
                 f"{RENDER_URL}/api/sync-bidirectional",
                 json=push_data,
@@ -1688,20 +1699,14 @@ def add_money():
             )
             
             if response.status_code == 200:
-                logger.info(f"✅ Đã push balance {user.balance}đ lên Render qua sync-bidirectional")
+                print(f"  ✅ Push thành công! Status: {response.status_code}")
+                logger.info(f"✅ Đã push balance {user.balance}đ lên Render")
             else:
-                # Thử API dự phòng
-                response2 = requests.post(
-                    f"{RENDER_URL}/api/force-sync-user",
-                    json={'user_id': user.user_id},
-                    timeout=5
-                )
-                if response2.status_code == 200:
-                    logger.info(f"✅ Đã push qua force-sync-user")
-                else:
-                    logger.warning(f"⚠️ Không thể push lên Render, code: {response.status_code}")
+                print(f"  ❌ Push thất bại! Status: {response.status_code}")
+                print(f"  Response: {response.text}")
                     
         except Exception as e:
+            print(f"  ❌ Lỗi push: {e}")
             logger.error(f"❌ Lỗi push lên Render: {e}")
         
         # Gửi thông báo Telegram
@@ -1714,6 +1719,9 @@ def add_money():
             f"• *Thời gian:* {datetime.now().strftime('%H:%M:%S %d/%m/%Y')}"
         )
         send_telegram_notification(user.user_id, message)
+        
+        print(f"  ✅ Hoàn tất! Balance mới: {user.balance}đ")
+        print("-" * 50)
         
         return jsonify({'success': True, 'new_balance': user.balance})
 
