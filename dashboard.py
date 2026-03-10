@@ -143,26 +143,25 @@ BASE_TEMPLATE = '''
     </style>
 </head>
 <body>
-    <!-- THÊM SCRIPT NÀY NGAY SAU THẺ BODY -->
-<script>
-    function updateClock() {
-        const now = new Date();
-        const hours = now.getHours().toString().padStart(2, '0');
-        const minutes = now.getMinutes().toString().padStart(2, '0');
-        const seconds = now.getSeconds().toString().padStart(2, '0');  // THÊM GIÂY
-        const day = now.getDate().toString().padStart(2, '0');
-        const month = (now.getMonth() + 1).toString().padStart(2, '0');
-        const year = now.getFullYear();
-        
-        const clockElement = document.getElementById('liveClock');
-        if (clockElement) {
-            clockElement.innerHTML = `<i class="bi bi-clock-history me-1"></i>${hours}:${minutes}:${seconds} ${day}/${month}/${year}`;
+    <!-- SCRIPT ĐỒNG HỒ - ĐẶT NGAY ĐẦU BODY -->
+    <script>
+        function updateClock() {
+            const now = new Date();
+            const hours = now.getHours().toString().padStart(2, '0');
+            const minutes = now.getMinutes().toString().padStart(2, '0');
+            const seconds = now.getSeconds().toString().padStart(2, '0');
+            const day = now.getDate().toString().padStart(2, '0');
+            const month = (now.getMonth() + 1).toString().padStart(2, '0');
+            const year = now.getFullYear();
+            
+            const clockElement = document.getElementById('liveClock');
+            if (clockElement) {
+                clockElement.innerHTML = `<i class="bi bi-clock-history me-1"></i>${hours}:${minutes}:${seconds} ${day}/${month}/${year}`;
+            }
         }
-    }
-    
-    updateClock();
-    setInterval(updateClock, 1000);  // Cập nhật mỗi giây
-</script>
+        updateClock();
+        setInterval(updateClock, 1000);
+    </script>
     
     {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}
@@ -222,32 +221,73 @@ BASE_TEMPLATE = '''
             }
         }
 
-        // Cập nhật đồng hồ mỗi giây
-        function updateClock() {
-            const now = new Date();
-            const hours = now.getHours().toString().padStart(2, '0');
-            const minutes = now.getMinutes().toString().padStart(2, '0');
-            const day = now.getDate().toString().padStart(2, '0');
-            const month = (now.getMonth() + 1).toString().padStart(2, '0');
-            const year = now.getFullYear();
-            
-            document.getElementById('liveClock').innerHTML = `<i class="bi bi-clock-history me-1"></i>${hours}:${minutes} ${day}/${month}/${year}`;
-        }
-        
-        updateClock();
-        setInterval(updateClock, 1000);
-        
-        // Tự động cập nhật dữ liệu mỗi 1 giây
+        // ===== TỰ ĐỘNG CẬP NHẬT DỮ LIỆU MỖI 1 GIÂY =====
         function updateData() {
             const path = window.location.pathname;
             
-            if (path === '/users') {
+            if (path === '/') {
+                updateDashboard();
+                updateRecentTransactions();
+            } else if (path === '/users') {
                 updateUsersTable();
             } else if (path.startsWith('/user/')) {
                 updateUserDetail();
             }
         }
         
+        // Cập nhật trang chủ
+        function updateDashboard() {
+            fetch('/api/stats')
+                .then(response => response.json())
+                .then(stats => {
+                    // Cập nhật số liệu thống kê
+                    const statNumbers = document.querySelectorAll('.stat-number');
+                    if (statNumbers.length >= 4) {
+                        statNumbers[0].textContent = stats.total_users.toLocaleString();
+                        statNumbers[1].textContent = stats.new_users.toLocaleString();
+                        statNumbers[2].textContent = stats.total_orders.toLocaleString();
+                        statNumbers[3].textContent = stats.success_orders.toLocaleString();
+                    }
+                    
+                    // Cập nhật doanh thu
+                    const revenueEl = document.querySelector('.stat-number.text-success');
+                    if (revenueEl) revenueEl.textContent = stats.revenue.toLocaleString() + 'đ';
+                    
+                    // Cập nhật chi phí
+                    const costEl = document.querySelector('.stat-number.text-danger');
+                    if (costEl) costEl.textContent = stats.cost.toLocaleString() + 'đ';
+                    
+                    // Cập nhật lợi nhuận
+                    const profitEl = document.querySelector('.profit-number');
+                    if (profitEl) profitEl.textContent = stats.profit.toLocaleString() + 'đ';
+                });
+        }
+        
+        // Cập nhật bảng giao dịch gần đây
+        function updateRecentTransactions() {
+            fetch('/api/recent-transactions')
+                .then(response => response.json())
+                .then(transactions => {
+                    const tbody = document.querySelector('.table-hover tbody');
+                    if (!tbody) return;
+                    
+                    let html = '';
+                    transactions.forEach(t => {
+                        html += `<tr>
+                            <td>${t.time}</td>
+                            <td><code>${t.user_id}</code></td>
+                            <td><span class="badge bg-${t.type === 'Nạp tiền' ? 'success' : 'primary'}">${t.type}</span></td>
+                            <td>${t.service || '—'}</td>
+                            <td class="fw-bold">${t.amount.toLocaleString()}đ</td>
+                            <td class="text-success fw-bold">${t.profit.toLocaleString()}đ</td>
+                            <td><span class="status-success">Thành công</span></td>
+                        </tr>`;
+                    });
+                    tbody.innerHTML = html;
+                });
+        }
+        
+        // Cập nhật bảng users
         function updateUsersTable() {
             fetch('/api/users/list')
                 .then(response => response.json())
@@ -281,6 +321,7 @@ BASE_TEMPLATE = '''
                 });
         }
         
+        // Cập nhật chi tiết user
         function updateUserDetail() {
             const userId = window.location.pathname.split('/').pop();
             fetch(`/api/user/${userId}`)
@@ -307,7 +348,163 @@ BASE_TEMPLATE = '''
                 });
         }
         
+        // Chạy update mỗi 1 giây
         setInterval(updateData, 1000);
+        
+        // Các hàm xử lý modal
+        let selectedUsers = [];
+
+        function toggleAll() {
+            let checkboxes = document.querySelectorAll('.user-checkbox');
+            let selectAll = document.getElementById('selectAll');
+            checkboxes.forEach(cb => {
+                cb.checked = selectAll.checked;
+                if (cb.checked) {
+                    if (!selectedUsers.includes(cb.value)) {
+                        selectedUsers.push(cb.value);
+                    }
+                } else {
+                    selectedUsers = selectedUsers.filter(id => id !== cb.value);
+                }
+            });
+            updateSelectedCount();
+        }
+
+        document.querySelectorAll('.user-checkbox').forEach(cb => {
+            cb.addEventListener('change', function() {
+                if (this.checked) {
+                    if (!selectedUsers.includes(this.value)) {
+                        selectedUsers.push(this.value);
+                    }
+                } else {
+                    selectedUsers = selectedUsers.filter(id => id !== this.value);
+                    document.getElementById('selectAll').checked = false;
+                }
+                updateSelectedCount();
+            });
+        });
+
+        function updateSelectedCount() {
+            document.getElementById('selectedCount').innerText = `Đã chọn ${selectedUsers.length} user`;
+        }
+
+        function addMoney(userId) { 
+            document.getElementById('modal_user_id').value = userId; 
+            new bootstrap.Modal(document.getElementById('addMoneyModal')).show(); 
+        }
+
+        function deductMoney(userId) { 
+            document.getElementById('deduct_modal_user_id').value = userId; 
+            new bootstrap.Modal(document.getElementById('deductMoneyModal')).show(); 
+        }
+
+        function sendMessage(userId) {
+            document.getElementById('msg_user_id').value = userId;
+            document.getElementById('msg_target_type').value = 'single';
+            document.getElementById('selectedUsersInfo').classList.add('d-none');
+            new bootstrap.Modal(document.getElementById('sendMessageModal')).show();
+        }
+
+        function sendToSelected() {
+            if (selectedUsers.length === 0) {
+                alert('Vui lòng chọn ít nhất 1 user!');
+                return;
+            }
+            document.getElementById('msg_target_type').value = 'multiple';
+            document.getElementById('selectedUsersInfo').classList.remove('d-none');
+            document.getElementById('selectedUsersCount').innerText = selectedUsers.length;
+            new bootstrap.Modal(document.getElementById('sendMessageModal')).show();
+        }
+
+        function broadcastToAll() {
+            if (!confirm('Bạn có chắc muốn gửi tin nhắn cho TẤT CẢ user?')) return;
+            document.getElementById('msg_target_type').value = 'all';
+            document.getElementById('selectedUsersInfo').classList.remove('d-none');
+            document.getElementById('selectedUsersCount').innerText = 'tất cả';
+            new bootstrap.Modal(document.getElementById('sendMessageModal')).show();
+        }
+
+        document.getElementById('addMoneyForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            fetch('/add_money', {
+                method: 'POST',
+                body: new URLSearchParams(new FormData(this))
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    location.reload();
+                } else {
+                    alert('Lỗi: ' + data.error);
+                }
+            })
+            .catch(error => {
+                alert('Lỗi kết nối: ' + error);
+            });
+        });
+
+        document.getElementById('deductMoneyForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            fetch('/deduct_money', {
+                method: 'POST',
+                body: new URLSearchParams(new FormData(this))
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    location.reload();
+                } else {
+                    alert('Lỗi: ' + data.error);
+                }
+            })
+            .catch(error => {
+                alert('Lỗi kết nối: ' + error);
+            });
+        });
+
+        document.getElementById('sendMessageForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            let formData = new FormData(this);
+            let targetType = document.getElementById('msg_target_type').value;
+            
+            if (targetType === 'multiple') {
+                formData.append('user_ids', JSON.stringify(selectedUsers));
+            }
+            
+            fetch('/send_message', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    alert(`✅ Gửi thành công!\n• Thành công: ${data.success_count}\n• Thất bại: ${data.failed_count}`);
+                    bootstrap.Modal.getInstance(document.getElementById('sendMessageModal')).hide();
+                } else {
+                    alert('Lỗi: ' + data.error);
+                }
+            })
+            .catch(error => {
+                alert('Lỗi kết nối: ' + error);
+            });
+        });
+
+        function toggleBan(userId) {
+            if(confirm('Bạn chắc chắn muốn thay đổi trạng thái khóa user này?')) {
+                fetch('/toggle_ban', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({user_id: userId})})
+                .then(() => location.reload());
+            }
+        }
+
+        function exportToExcel() { window.location.href = '/export_users'; }
+
+        document.getElementById('searchInput').addEventListener('keyup', function() {
+            let val = this.value.toLowerCase();
+            document.querySelectorAll('#usersTable tbody tr').forEach(row => {
+                row.style.display = row.textContent.toLowerCase().includes(val) ? '' : 'none';
+            });
+        });
     </script>
 </body>
 </html>
@@ -1230,10 +1427,61 @@ document.getElementById('sendMessageForm')?.addEventListener('submit', function(
 # ====================== API ROUTES ======================
 @app.route('/api/stats')
 def api_stats():
-    """API trả về thống kê"""
+    """API trả về thống kê cho trang chủ"""
     with app.app_context():
         total_users = User.query.count()
-        return jsonify({'total_users': total_users})
+        new_users = User.query.filter(User.created_at >= datetime.now() - timedelta(days=1)).count()
+        rentals = Rental.query.all()
+        
+        rental_total = sum(r.price_charged for r in rentals if r.status == 'success')
+        api_cost = sum(r.cost or 0 for r in rentals if r.status == 'success')
+        profit_val = rental_total - api_cost
+        
+        return jsonify({
+            'total_users': total_users,
+            'new_users': new_users,
+            'total_orders': len(rentals),
+            'success_orders': len([r for r in rentals if r.status == 'success']),
+            'revenue': rental_total,
+            'cost': api_cost,
+            'profit': profit_val
+        })
+
+@app.route('/api/recent-transactions')
+def api_recent_transactions():
+    """API trả về 10 giao dịch gần nhất"""
+    with app.app_context():
+        transactions = Transaction.query.order_by(Transaction.created_at.desc()).limit(10).all()
+        rentals = Rental.query.order_by(Rental.created_at.desc()).limit(10).all()
+        
+        recent = []
+        all_items = list(transactions) + list(rentals)
+        all_items.sort(key=lambda x: x.created_at, reverse=True)
+        
+        result = []
+        for item in all_items[:10]:
+            if hasattr(item, 'type') and item.type == 'deposit':
+                user = User.query.get(item.user_id)
+                result.append({
+                    'time': item.created_at.strftime('%H:%M %d/%m'),
+                    'user_id': user.user_id if user else item.user_id,
+                    'type': 'Nạp tiền',
+                    'service': None,
+                    'amount': item.amount,
+                    'profit': 0
+                })
+            elif hasattr(item, 'service_name'):
+                user = User.query.get(item.user_id)
+                result.append({
+                    'time': item.created_at.strftime('%H:%M %d/%m'),
+                    'user_id': user.user_id if user else item.user_id,
+                    'type': 'Thuê số',
+                    'service': item.service_name,
+                    'amount': item.price_charged,
+                    'profit': item.price_charged - (item.cost or 0)
+                })
+        
+        return jsonify(result)
 
 @app.route('/api/users/list')
 def api_users_list():
