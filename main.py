@@ -695,7 +695,6 @@ def api_sync_bidirectional():
     except Exception as e:
         logger.error(f"❌ Lỗi sync bidirectional: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
-
 # ===== API 11: FORCE ĐỒNG BỘ USER =====
 @app.route('/api/force-sync-user', methods=['POST'])
 def api_force_sync_user():

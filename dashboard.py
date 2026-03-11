@@ -12,7 +12,33 @@ import csv
 import asyncio
 import time
 import threading
-
+def save_failed_push(user_id, balance, username):
+    """Lưu push thất bại để xử lý sau"""
+    try:
+        failed_file = 'failed_pushes.json'
+        failed = []
+        if os.path.exists(failed_file):
+            with open(failed_file, 'r') as f:
+                failed = json.load(f)
+        
+        failed.append({
+            'user_id': user_id,
+            'balance': balance,
+            'username': username,
+            'time': datetime.now().isoformat()
+        })
+        
+        # Giữ 100 entry gần nhất
+        if len(failed) > 100:
+            failed = failed[-100:]
+        
+        with open(failed_file, 'w') as f:
+            json.dump(failed, f, indent=2)
+        
+        logger.info(f"💾 Đã lưu push thất bại của user {user_id}")
+        
+    except Exception as e:
+        logger.error(f"❌ Lỗi lưu failed push: {e}")
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
@@ -1965,11 +1991,6 @@ def add_money():
     amount = request.form.get('amount', type=int)
     reason = request.form.get('reason', 'Cộng tiền thủ công')
     
-    print(f"\n🔍 DEBUG - Cộng tiền thủ công:")
-    print(f"  User ID: {user_id}")
-    print(f"  Amount: {amount}đ")
-    print(f"  Reason: {reason}")
-    
     if not user_id or not amount or amount < 1000:
         return jsonify({'success': False, 'error': 'Thông tin không hợp lệ'})
     
@@ -2001,23 +2022,42 @@ def add_money():
         
         logger.info(f"✅ LOCAL UPDATE: User {user_id}: {old_balance}đ → {new_balance}đ")
         
-        # ===== BƯỚC 2: PUSH LÊN RENDER (KHÔNG CHỜ) =====
-        try:
-            RENDER_URL = "https://bot-thue-sms-new.onrender.com"
-            push_data = {
-                'user_id': user.user_id,
-                'balance': user.balance,
-                'username': user.username or f"user_{user.user_id}"
-            }
-            
-            threading.Thread(target=lambda: requests.post(
-                f"{RENDER_URL}/api/sync-bidirectional",
-                json=push_data,
-                timeout=3
-            )).start()
-            logger.info(f"📤 Push lên Render: {user.balance}đ")
-        except Exception as e:
-            logger.error(f"❌ Lỗi push: {e}")
+        # ===== BƯỚC 2: PUSH LÊN RENDER VỚI RETRY =====
+        push_success = False
+        RENDER_URL = "https://bot-thue-sms-new.onrender.com"
+        push_data = {
+            'user_id': user.user_id,
+            'balance': user.balance,
+            'username': user.username or f"user_{user.user_id}"
+        }
+        
+        # Thử push 5 lần với exponential backoff
+        for attempt in range(5):
+            try:
+                response = requests.post(
+                    f"{RENDER_URL}/api/sync-bidirectional",
+                    json=push_data,
+                    timeout=5
+                )
+                
+                if response.status_code == 200:
+                    push_success = True
+                    logger.info(f"📤 Push lên Render thành công lần {attempt+1}")
+                    break
+                else:
+                    logger.warning(f"⚠️ Push lần {attempt+1} thất bại: {response.status_code}")
+                    if attempt < 4:
+                        time.sleep(2 ** attempt)  # 1,2,4,8 giây
+                        
+            except Exception as e:
+                logger.error(f"❌ Lỗi push lần {attempt+1}: {e}")
+                if attempt < 4:
+                    time.sleep(2 ** attempt)
+        
+        if not push_success:
+            # Lưu vào file để retry sau
+            save_failed_push(user.user_id, user.balance, user.username)
+            logger.error(f"❌ Push thất bại sau 5 lần - Đã lưu để retry")
         
         # Gửi Telegram
         message = (
@@ -2072,23 +2112,42 @@ def deduct_money():
         
         logger.info(f"✅ LOCAL UPDATE: User {user_id}: {old_balance}đ → {new_balance}đ")
         
-        # ===== BƯỚC 2: PUSH LÊN RENDER (KHÔNG CHỜ) =====
-        try:
-            RENDER_URL = "https://bot-thue-sms-new.onrender.com"
-            push_data = {
-                'user_id': user.user_id,
-                'balance': user.balance,
-                'username': user.username or f"user_{user.user_id}"
-            }
-            
-            threading.Thread(target=lambda: requests.post(
-                f"{RENDER_URL}/api/sync-bidirectional",
-                json=push_data,
-                timeout=3
-            )).start()
-            logger.info(f"📤 Push lên Render: {user.balance}đ")
-        except Exception as e:
-            logger.error(f"❌ Lỗi push: {e}")
+        # ===== BƯỚC 2: PUSH LÊN RENDER VỚI RETRY =====
+        push_success = False
+        RENDER_URL = "https://bot-thue-sms-new.onrender.com"
+        push_data = {
+            'user_id': user.user_id,
+            'balance': user.balance,
+            'username': user.username or f"user_{user.user_id}"
+        }
+        
+        # Thử push 5 lần với exponential backoff
+        for attempt in range(5):
+            try:
+                response = requests.post(
+                    f"{RENDER_URL}/api/sync-bidirectional",
+                    json=push_data,
+                    timeout=5
+                )
+                
+                if response.status_code == 200:
+                    push_success = True
+                    logger.info(f"📤 Push lên Render thành công lần {attempt+1}")
+                    break
+                else:
+                    logger.warning(f"⚠️ Push lần {attempt+1} thất bại: {response.status_code}")
+                    if attempt < 4:
+                        time.sleep(2 ** attempt)
+                        
+            except Exception as e:
+                logger.error(f"❌ Lỗi push lần {attempt+1}: {e}")
+                if attempt < 4:
+                    time.sleep(2 ** attempt)
+        
+        if not push_success:
+            # Lưu vào file để retry sau
+            save_failed_push(user.user_id, user.balance, user.username)
+            logger.error(f"❌ Push thất bại sau 5 lần - Đã lưu để retry")
         
         # Gửi Telegram
         message = (
