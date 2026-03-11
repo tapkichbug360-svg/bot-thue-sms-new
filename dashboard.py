@@ -2069,7 +2069,34 @@ def deduct_money():
             return jsonify({'success': False, 'error': f'Số dư không đủ! User chỉ có {user.balance:,}đ'})
         
         old_balance = user.balance
-        user.balance -= amount
+        new_balance = old_balance - amount
+        
+        # ===== QUAN TRỌNG: ĐỒNG BỘ LÊN RENDER TRƯỚC =====
+        RENDER_URL = "https://bot-thue-sms-new.onrender.com"
+        push_data = {
+            'user_id': user.user_id,
+            'balance': new_balance,
+            'username': user.username or f"user_{user.user_id}"
+        }
+        
+        try:
+            # Thử đồng bộ lên Render
+            response = requests.post(
+                f"{RENDER_URL}/api/sync-bidirectional",
+                json=push_data,
+                timeout=5
+            )
+            
+            if response.status_code != 200:
+                logger.error(f"❌ Đồng bộ Render thất bại: {response.status_code}")
+                return jsonify({'success': False, 'error': 'Không thể đồng bộ lên Render, vui lòng thử lại'})
+                
+        except Exception as e:
+            logger.error(f"❌ Lỗi kết nối Render: {e}")
+            return jsonify({'success': False, 'error': 'Lỗi kết nối Render'})
+        
+        # ===== NẾU ĐỒNG BỘ RENDER THÀNH CÔNG, MỚI CẬP NHẬT LOCAL =====
+        user.balance = new_balance
         
         transaction_code = f"DEDUCT_{datetime.now().strftime('%Y%m%d%H%M%S')}_{secrets.token_hex(3).upper()}"
         
@@ -2086,54 +2113,34 @@ def deduct_money():
         db.session.add(transaction)
         db.session.commit()
         
-        # ===== ĐỒNG BỘ LÊN SEPAY (THÊM MỚI) =====
+        # ===== ĐỒNG BỘ LÊN SEPAY (không bắt buộc) =====
         try:
             SEPAY_URL = os.getenv('SEPAY_URL', 'https://bot-thue-sms-sepay.onrender.com')
-            
             sync_data = {
                 'type': 'manual_transaction',
                 'user_id': user.user_id,
-                'amount': -amount,  # Âm để biết là trừ
-                'balance': user.balance,
+                'amount': -amount,
+                'balance': new_balance,
                 'transaction_code': transaction_code,
                 'reason': reason,
                 'timestamp': datetime.now().isoformat()
             }
-            
-            response = requests.post(
-                f"{SEPAY_URL}/api/receive-sync",
-                json=sync_data,
-                timeout=5
-            )
-            
-            # ===== TẮT SYNC RENDER KHI TRỪ TIỀN =====
-            # RENDER_URL = "https://bot-thue-sms-new.onrender.com"
-            # push_data = {
-            #     'user_id': user.user_id,
-            #     'balance': user.balance,
-            #     'username': user.username or f"user_{user.user_id}"
-            # }
-            #
-            # requests.post(
-            #     f"{RENDER_URL}/api/update-balance",
-            #     json=push_data,
-            #     timeout=5
-            # )
-            
-        except Exception as e:
-            logger.error(f"❌ Lỗi đồng bộ: {e}")
+            requests.post(f"{SEPAY_URL}/api/receive-sync", json=sync_data, timeout=3)
+        except:
+            pass
         
         # Gửi Telegram
         message = (
-            f"💸 *TRỪ TIỀN THỦ CÔNG*\n\n"
-            f"• *Số tiền:* -{amount:,}đ\n"
-            f"• *Mã GD:* `{transaction_code}`\n"
-            f"• *Số dư mới:* {user.balance:,}đ\n"
-            f"• *Lý do:* {reason}"
+            f"💸 **TRỪ TIỀN THỦ CÔNG**\n\n"
+            f"• **Số tiền:** -{amount:,}đ\n"
+            f"• **Mã GD:** `{transaction_code}`\n"
+            f"• **Số dư mới:** {new_balance:,}đ\n"
+            f"• **Lý do:** {reason}\n"
+            f"• **Thời gian:** {datetime.now().strftime('%H:%M:%S %d/%m/%Y')}"
         )
         send_telegram_notification(user.user_id, message)
         
-        return jsonify({'success': True, 'new_balance': user.balance})
+        return jsonify({'success': True, 'new_balance': new_balance})
 
 # ===== THÊM ROUTE KIỂM TRA ĐỒNG BỘ =====
 @app.route('/sync-status')
