@@ -379,7 +379,7 @@ class UserSyncDaemon:
                     render_balance = int(data.get('new_balance'))
                     
                     # CHỈ UPDATE KHI RENDER LỚN HƠN
-                    if render_balance > local_balance:
+                    if render_balance != local_balance:
                         
                         diff = render_balance - local_balance
                         

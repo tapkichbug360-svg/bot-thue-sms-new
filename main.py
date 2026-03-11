@@ -589,8 +589,6 @@ def api_reset_cache():
         return jsonify({"success": True, "message": "Cache reset"}), 200
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
-
-# ===== API 10: ĐỒNG BỘ 2 CHIỀU + UPDATE BALANCE TRỰC TIẾP =====
 # ===== API 10: ĐỒNG BỘ 2 CHIỀU + UPDATE BALANCE TRỰC TIẾP =====
 @app.route('/api/sync-bidirectional', methods=['POST'])
 def api_sync_bidirectional():
@@ -610,26 +608,30 @@ def api_sync_bidirectional():
                 user = get_or_create_user(user_id, username)
                 old_balance = user.balance
                 
-                # CHỈ CẬP NHẬT NẾU KHÁC
-                if user.balance != balance:
-                    user.balance = balance
+                balance = int(balance)
+
+                # ===== FIX: KHÔNG GHI ĐÈ BALANCE KHI NHỎ HƠN =====
+                if balance > old_balance:
+                    amount_diff = balance - old_balance
+                    user.balance += amount_diff
                     user.last_active = get_vn_time()
+
                     if username:
                         user.username = username
-                    
+
                     db.session.commit()
-                    
-                    logger.info(f"💰 DIRECT UPDATE: User {user_id}: {old_balance}đ → {balance}đ")
-                    
-                    # CHỈ TẠO TRANSACTION NẾU SỐ TIỀN THAY ĐỔI (KHÁC 0)
-                    amount_diff = balance - old_balance
+
+                    logger.info(
+                        f"💰 DIRECT UPDATE: User {user_id}: {old_balance}đ → {user.balance}đ (+{amount_diff})"
+                    )
+
+                    # CHỈ TẠO TRANSACTION NẾU SỐ TIỀN THAY ĐỔI
                     if amount_diff != 0:
-                        # DÙNG MILLISECONDS + RANDOM ĐỂ TRÁNH TRÙNG
                         import secrets
                         millis = int(time.time() * 1000)
                         random_suffix = secrets.token_hex(2).upper()
                         trans_code = f"DIRECT_{millis}_{random_suffix}"
-                        
+
                         transaction = Transaction(
                             user_id=user.id,
                             amount=amount_diff,
@@ -641,10 +643,14 @@ def api_sync_bidirectional():
                         )
                         db.session.add(transaction)
                         db.session.commit()
-                        logger.info(f"✅ Đã tạo transaction {trans_code}: {amount_diff:+,}đ")
-                    else:
-                        logger.info(f"⏭️ Balance không đổi, bỏ qua tạo transaction")
-                
+
+                        logger.info(f"✅ Đã tạo transaction {trans_code}: +{amount_diff:,}đ")
+
+                else:
+                    logger.info(
+                        f"⏭️ Bỏ qua sync vì balance Render nhỏ hơn hoặc bằng ({balance} ≤ {old_balance})"
+                    )
+
                 return jsonify({
                     "success": True,
                     "direct_update": True,
