@@ -286,56 +286,73 @@ class UserSyncDaemon:
             self.log(f"⚠️ Telegram lỗi: {e}", "WARNING")
     
     # ==================== ĐẨY DỮ LIỆU LÊN RENDER ====================
-    def push_user_to_render(self, user_id, balance, username, reason=""):
-        """Đẩy user lên Render - LUÔN PUSH KHI CẦN"""
-        
-        # ===== BỎ QUA NẾU BALANCE = 0 =====
-        if balance == 0:
-            self.log(f"⏭️ User {user_id}: Balance = 0, bỏ qua push", "INFO")
-            self.update_stats('push_success')
-            return True
-
-        # KIỂM TRA BALANCE HIỆN TẠI TRÊN RENDER
-        render_balance = self.get_render_balance(user_id)
-        if render_balance is not None and render_balance >= balance:
-            self.log(f"⏭️ User {user_id}: Balance đã đồng bộ ({balance}đ)", "INFO")
-            self.update_stats('push_success')
-            return True
-
-        # ===== THỰC HIỆN PUSH LÊN RENDER =====
-        start_time = time.time()
+    def pull_user_from_render(self, user_id):
+        """Kéo user từ Render về - PHÁT HIỆN THAY ĐỔI 2 CHIỀU"""
         try:
-            payload = {
-                'user_id': user_id,
-                'balance': balance,
-                'username': username,
-                'reason': reason,
-                'timestamp': datetime.now().isoformat()
-            }
+            self.log(f"📥 Đang kéo user {user_id} từ Render về...", "INFO")
             
+            # Lấy balance hiện tại từ local
+            local_balance = self.get_user_balance(user_id)
+            
+            # Gọi API check-user
             response = requests.post(
-                f"{RENDER_URL}/api/sync-bidirectional",
-                json=payload,
-                timeout=self.push_timeout
+                f"{RENDER_URL}/api/check-user",
+                json={'user_id': user_id},
+                timeout=3
             )
             
             if response.status_code == 200:
-                elapsed = time.time() - start_time
-                self.log(f"✅ Push user {user_id} thành công: {balance}đ", "SUCCESS")
-                self.update_stats('push_success')
-                self.last_sync[user_id] = time.time()
+                data = response.json()
+                render_balance = data.get('balance')
+                
+                if render_balance is None:
+                    return False
+                
+                # ===== SO SÁNH VÀ XỬ LÝ =====
+                if render_balance > local_balance:
+                    # Render cao hơn (do nạp từ SePay)
+                    self.update_local_balance(user_id, render_balance)
+                    diff = render_balance - local_balance
+                    self.log(f"📥 Cập nhật local từ Render: {local_balance} → {render_balance} (+{diff})", "SUCCESS")
+                    
+                elif render_balance < local_balance:
+                    # Local cao hơn (do trừ tiền từ dashboard)
+                    self.log(f"⚠️ Local cao hơn Render: {local_balance} > {render_balance}", "WARNING")
+                    self.push_user_to_render(user_id, local_balance, f"user_{user_id}", "sync_from_daemon")
+                    
+                else:
+                    self.log(f"✅ User {user_id}: Đã đồng bộ {local_balance}đ", "INFO")
+                
                 return True
             else:
-                self.log(f"⚠️ Push user {user_id} thất bại: HTTP {response.status_code}", "WARNING")
-                self.update_stats('push_failed')
-                self._save_failed_push(user_id, balance, username, reason)
+                self.log(f"⚠️ check-user lỗi {response.status_code}", "WARNING")
                 return False
                 
         except Exception as e:
-            self.log(f"❌ Lỗi push user {user_id}: {e}", "ERROR")
-            self.update_stats('push_failed')
-            self._save_failed_push(user_id, balance, username, f"{reason}_error")
+            self.log(f"❌ Lỗi pull user {user_id}: {e}", "ERROR")
             return False
+    def check_and_sync_user(self, user_id, local_balance):
+        """Kiểm tra và đồng bộ user khi có thay đổi"""
+        
+        # Lấy balance từ Render
+        render_balance = self.get_render_balance(user_id)
+        
+        if render_balance is None:
+            return False
+        
+        if local_balance > render_balance:
+            # Local cao hơn (do nạp/trừ tiền) → Đẩy lên Render
+            self.log(f"⚠️ User {user_id}: Local({local_balance}) > Render({render_balance})", "WARNING")
+            self.push_user_to_render(user_id, local_balance, f"user_{user_id}", "sync_needed")
+            return True
+            
+        elif local_balance < render_balance:
+            # Render cao hơn → Cập nhật local
+            self.log(f"📥 User {user_id}: Render({render_balance}) > Local({local_balance})", "INFO")
+            self.update_local_balance(user_id, render_balance)
+            return True
+        
+        return False
     
     def push_user_batch(self, users):
         """Đẩy nhiều user song song - LỌC USER CÓ BALANCE > 0"""
