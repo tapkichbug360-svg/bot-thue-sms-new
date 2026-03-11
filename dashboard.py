@@ -2020,7 +2020,7 @@ def add_money():
             }
             
             response = requests.post(
-                f"{RENDER_URL}/api/sync-bidirectional",
+                f"{RENDER_URL}/api/update-balance",
                 json=push_data,
                 timeout=5
             )
@@ -2139,7 +2139,7 @@ def sync_status():
                 <div class="col-md-6">
                     <h6>Kết nối SePay</h6>
                     <div id="sepay-status">Đang kiểm tra...</div>
-                </div>
+                </div> 
                 <div class="col-md-6">
                     <h6>Kết nối Render</h6>
                     <div id="render-status">Đang kiểm tra...</div>
