@@ -287,26 +287,55 @@ class UserSyncDaemon:
     
     # ==================== ĐẨY DỮ LIỆU LÊN RENDER ====================
     def push_user_to_render(self, user_id, balance, username, reason=""):
-        """Đẩy user lên Render - KHÔNG PUSH KHI BALANCE = 0"""
+        """Đẩy user lên Render - LUÔN PUSH KHI CẦN"""
         
-        # ===== QUAN TRỌNG: KHÔNG PUSH NẾU BALANCE = 0 =====
+        # ===== BỎ QUA NẾU BALANCE = 0 =====
         if balance == 0:
-            self.log(f"⏭️ User {user_id}: Balance = 0, bỏ qua push để tránh reset", "INFO")
+            self.log(f"⏭️ User {user_id}: Balance = 0, bỏ qua push", "INFO")
             self.update_stats('push_success')
             return True
 
         # KIỂM TRA BALANCE HIỆN TẠI TRÊN RENDER
         render_balance = self.get_render_balance(user_id)
         if render_balance is not None and render_balance >= balance:
-            self.log(f"⏭️ User {user_id}: Balance đã đồng bộ ({balance}đ), bỏ qua push", "INFO")
+            self.log(f"⏭️ User {user_id}: Balance đã đồng bộ ({balance}đ)", "INFO")
             self.update_stats('push_success')
             return True
 
-        # 🔴 THÊM DÒNG NÀY (QUAN TRỌNG)
-        self.log(f"⛔ Daemon không push balance lên Render nữa để tránh reset", "INFO")
-        return True
-
+        # ===== THỰC HIỆN PUSH LÊN RENDER =====
         start_time = time.time()
+        try:
+            payload = {
+                'user_id': user_id,
+                'balance': balance,
+                'username': username,
+                'reason': reason,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            response = requests.post(
+                f"{RENDER_URL}/api/sync-bidirectional",
+                json=payload,
+                timeout=self.push_timeout
+            )
+            
+            if response.status_code == 200:
+                elapsed = time.time() - start_time
+                self.log(f"✅ Push user {user_id} thành công: {balance}đ", "SUCCESS")
+                self.update_stats('push_success')
+                self.last_sync[user_id] = time.time()
+                return True
+            else:
+                self.log(f"⚠️ Push user {user_id} thất bại: HTTP {response.status_code}", "WARNING")
+                self.update_stats('push_failed')
+                self._save_failed_push(user_id, balance, username, reason)
+                return False
+                
+        except Exception as e:
+            self.log(f"❌ Lỗi push user {user_id}: {e}", "ERROR")
+            self.update_stats('push_failed')
+            self._save_failed_push(user_id, balance, username, f"{reason}_error")
+            return False
     
     def push_user_batch(self, users):
         """Đẩy nhiều user song song - LỌC USER CÓ BALANCE > 0"""
