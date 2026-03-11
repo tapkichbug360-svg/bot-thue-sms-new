@@ -389,9 +389,10 @@ def setup_sepay_webhook(app):
                 # LUÔN CỘNG TIỀN - KHÔNG BAO GIỜ BỎ QUA
                 target_user.balance += amount
                 logger.info(f"💰 ĐÃ CỘNG {amount} VÀO BALANCE: {old_balance} → {target_user.balance}")
-                # ===== THÊM DÒNG NÀY ĐỂ KIỂM TRA =====
-                print(f"🔴🔴🔴 KIỂM TRA: ĐÃ CỘNG {amount}, BALANCE={target_user.balance}")  # In ra console
-                logger.critical(f"🔴🔴🔴 KIỂM TRA: ĐÃ CỘNG {amount}, BALANCE={target_user.balance}")  # Log level cao nhất
+
+                # KIỂM TRA BẰNG LOG CẤP CAO NHẤT
+                print(f"🔴🔴🔴 KIỂM TRA: ĐÃ CỘNG {amount}, BALANCE={target_user.balance}")
+                logger.critical(f"🔴🔴🔴 KIỂM TRA: ĐÃ CỘNG {amount}, BALANCE={target_user.balance}")
 
                 # XỬ LÝ TRANSACTION (CHỈ ĐỂ LƯU LỊCH SỬ)
                 if not transaction:
@@ -409,11 +410,20 @@ def setup_sepay_webhook(app):
                     db.session.add(transaction)
                     logger.info(f"✅ TẠO TRANSACTION MỚI: {transaction_code}")
                 else:
-                    # Cập nhật transaction cũ (chỉ để thống kê)
-                    transaction.amount += amount
-                    transaction.updated_at = current_time
-                    logger.info(f"🔄 CẬP NHẬT TRANSACTION CŨ: {transaction.amount}")
-
+                    # TẠO TRANSACTION MỚI CHO LẦN NẠP NÀY (KHÔNG CỘNG DỒN)
+                    new_code = f"{transaction_code}_{int(time.time())}"[-20:]  # Giới hạn độ dài
+                    new_transaction = Transaction(
+                        user_id=target_user.id,
+                        amount=amount,
+                        type='deposit',
+                        status='success',
+                        transaction_code=new_code,
+                        description=f"NAP qua SePay (lần {transaction.amount + 1}): {content}",
+                        created_at=current_time,
+                        updated_at=current_time
+                    )
+                    db.session.add(new_transaction)
+                    logger.info(f"✅ TẠO TRANSACTION MỚI CHO LẦN NẠP THỨ {transaction.amount + 1}: {new_code}")
                 # Cập nhật thời gian
                 target_user.last_active = current_time
 

@@ -392,7 +392,7 @@ class UserSyncDaemon:
     # ==================== KÉO DỮ LIỆU TỪ RENDER VỀ ====================
     def pull_user_from_render(self, user_id):
         """
-        KÉO USER TỪ RENDER VỀ - CHỈ CẬP NHẬT KHI RENDER CAO HƠN
+        KÉO USER TỪ RENDER VỀ - CHỈ DÙNG sync-bidirectional, KHÔNG TẠO USER MỚI
         """
         try:
             self.log(f"📥 Đang kéo user {user_id} từ Render về...", "INFO")
@@ -400,7 +400,7 @@ class UserSyncDaemon:
             # Lấy balance hiện tại từ local
             local_balance = self.get_user_balance(user_id)
             
-            # NẾU LOCAL = 0, BỎ QUA
+            # NẾU LOCAL = 0, BỎ QUA (TRÁNH TẠO USER MỚI TRÊN RENDER)
             if local_balance == 0:
                 self.log(f"⏭️ User {user_id}: Local balance = 0, bỏ qua pull", "INFO")
                 return True
@@ -423,25 +423,18 @@ class UserSyncDaemon:
                 if data.get('direct_update') and data.get('new_balance'):
                     render_balance = data.get('new_balance')
                     
-                    # ===== QUAN TRỌNG: SO SÁNH TRƯỚC KHI GHI =====
-                    if render_balance > local_balance:
-                        # RENDER CAO HƠN → Cập nhật local
+                    if render_balance != local_balance:
                         self.update_local_balance(user_id, render_balance)
                         diff = render_balance - local_balance
-                        self.log(f"📥 Cập nhật từ Render: {local_balance} → {render_balance} (+{diff})", "SUCCESS")
+                        self.log(f"✅ User {user_id}: {local_balance}đ → {render_balance}đ ({diff:+,}đ)", "SUCCESS")
                         
                         # Gửi thông báo
-                        self.send_telegram_notification(user_id, render_balance, diff, "NAP")
-                        
-                    elif render_balance < local_balance:
-                        # LOCAL CAO HƠN → Đẩy local lên Render
-                        self.log(f"📤 Local cao hơn, đẩy lên Render: {local_balance} > {render_balance}", "INFO")
-                        self.push_user_to_render(user_id, local_balance, f"user_{user_id}", "sync_from_daemon")
-                        
+                        if diff > 0:
+                            self.send_telegram_notification(user_id, render_balance, diff, "NAP")
+                        else:
+                            self.send_telegram_notification(user_id, render_balance, diff, "TIÊU")
                     else:
-                        # BẰNG NHAU
-                        self.log(f"✅ Đã đồng bộ: {local_balance}đ", "SUCCESS")
-                        
+                        self.log(f"✅ User {user_id}: Đã đồng bộ {local_balance}đ", "SUCCESS")
                     return True
                 else:
                     self.log(f"✅ User {user_id}: Giữ nguyên {local_balance}đ", "SUCCESS")
@@ -489,6 +482,7 @@ class UserSyncDaemon:
             self.log(f"❌ Force sync user {user_id} thất bại", "ERROR")
         
         return result
+    
     
     # ==================== XỬ LÝ FAILED PUSHES ====================
     def _save_failed_push(self, user_id, balance, username, reason):
