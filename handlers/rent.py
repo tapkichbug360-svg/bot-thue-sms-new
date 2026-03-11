@@ -311,6 +311,145 @@ async def rent_command(update: Update, context: Context):
     )
 
     await loading_msg.edit_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+async def rent_service_callback(update: Update, context: Context):
+    """Xử lý khi chọn dịch vụ (callback từ menu rent)"""
+    query = update.callback_query
+    await safe_answer_callback(query, "⏳ Đang tải...")
+    
+    try:
+        data = query.data.split('_')
+        service_id = data[2]
+        service_name = data[3]
+        original_price = int(float(data[4]))
+        final_price = original_price + 1000
+    except Exception as e:
+        logger.error(f"Lỗi parse service: {e}")
+        await safe_edit_message(query, "❌ **LỖI DỮ LIỆU**\n\nVui lòng chọn lại.")
+        return
+    
+    context.user_data['rent'] = {
+        'service_id': service_id,
+        'service_name': service_name,
+        'final_price': final_price,
+        'original_price': original_price
+    }
+    
+    if query.message:
+        await safe_delete_message(query.message)
+    
+    loading_msg = await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="⏳ **ĐANG TẢI DANH SÁCH NHÀ MẠNG...**",
+        parse_mode='Markdown'
+    )
+    
+    networks = await get_networks()
+    
+    if not networks:
+        keyboard = [[InlineKeyboardButton("🔙 QUAY LẠI", callback_data="menu_rent")]]
+        await loading_msg.edit_text(
+            "❌ **KHÔNG THỂ LẤY DANH SÁCH NHÀ MẠNG**",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+        return
+    
+    active_networks = [net for net in networks if net.get('status') == 1]
+    
+    if not active_networks:
+        keyboard = [[InlineKeyboardButton("🔙 QUAY LẠI", callback_data="menu_rent")]]
+        await loading_msg.edit_text(
+            "⚠️ **KHÔNG CÓ NHÀ MẠNG NÀO HOẠT ĐỘNG**",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+        return
+    
+    keyboard = []
+    for net in active_networks[:10]:
+        net_id = net.get('id')
+        net_name = net.get('name')
+        if net_id and net_name:
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"📶 {net_name}",
+                    callback_data=f"rent_network_{net_id}_{net_name}"
+                )
+            ])
+    
+    keyboard.append([InlineKeyboardButton("🔙 QUAY LẠI", callback_data="menu_rent")])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await loading_msg.edit_text(
+        f"📱 **{service_name}**\n📶 **Chọn nhà mạng:**",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+async def rent_network_callback(update: Update, context: Context):
+    """Xử lý khi chọn nhà mạng"""
+    query = update.callback_query
+    await safe_answer_callback(query)
+    
+    try:
+        data = query.data.split('_')
+        network_id = data[2]
+        network_name = data[3]
+    except Exception as e:
+        logger.error(f"Lỗi parse network: {e}")
+        await safe_edit_message(query, "❌ **LỖI DỮ LIỆU**\n\nVui lòng chọn lại.")
+        return
+    
+    rent_info = context.user_data.get('rent', {})
+    service_id = rent_info.get('service_id')
+    service_name = rent_info.get('service_name')
+    final_price = rent_info.get('final_price')
+    original_price = rent_info.get('original_price')
+    
+    if not service_id or final_price is None:
+        await safe_edit_message(query, "❌ **LỖI!**\n\nVui lòng chọn lại dịch vụ.")
+        return
+    
+    user = update.effective_user
+    
+    with app.app_context():
+        db_user = User.query.filter_by(user_id=user.id).first()
+        current_balance = db_user.balance if db_user else 0
+    
+    if query.message:
+        await safe_delete_message(query.message)
+    
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "✅ XÁC NHẬN THUÊ",
+                callback_data=f"rent_confirm_{service_id}_{final_price}_{network_id}"
+            )
+        ],
+        [
+            InlineKeyboardButton("🔙 QUAY LẠI", callback_data="menu_rent")
+        ]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    text = (
+        f"📱 **XÁC NHẬN THUÊ SỐ**\n\n"
+        f"• **Dịch vụ:** {service_name}\n"
+        f"• **Nhà mạng:** {network_name}\n"
+        f"• **Số dư của bạn:** {current_balance:,}đ\n\n"
+        f"📌 **Lưu ý:**\n"
+        f"• Số tiền sẽ được trừ ngay sau khi xác nhận\n"
+        f"• Có thể hủy và được hoàn tiền nếu chưa nhận OTP\n"
+        f"• Số có hiệu lực trong 5 phút\n\n"
+        f"❓ **Xác nhận thuê số?**"
+    )
+    
+    await safe_send_message(
+        context,
+        update.effective_chat.id,
+        text,
+        reply_markup
+    )
 
 # (các hàm rent_service_callback, rent_network_callback giữ nguyên như code cũ của bạn)
 
@@ -591,7 +730,7 @@ async def auto_check_otp_task(bot, chat_id: int, otp_id: str, rental_id: int, us
         auto_check_tasks.pop(rental_id, None)
         rental_locks.pop(rental_id, None)
 
-async def rent_cancel_callback(update: Update, context: Context):
+async def rent_cancel_v2_callback(update: Update, context: Context):
     query = update.callback_query
     await safe_answer_callback(query, "⏳ Đang hủy...")
 
