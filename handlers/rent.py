@@ -1078,6 +1078,13 @@ async def auto_check_otp_task(bot, chat_id: int, otp_id: str, rental_id: int, us
                         if rental.refunded:
                             return
                         
+                        # ===== KIỂM TRA THỜI GIAN TRƯỚC KHI HOÀN =====
+                        now = datetime.now()
+                        if now < rental.expires_at:
+                            # CHƯA HẾT HẠN, KHÔNG HOÀN
+                            logger.info(f"⏳ Rental {rental_id} chưa hết hạn, không hoàn tiền (status 400)")
+                            continue
+                        
                         refund = rental.price_charged
 
                         user = User.query.filter_by(user_id=rental.user_id).with_for_update().first()
@@ -1094,14 +1101,14 @@ async def auto_check_otp_task(bot, chat_id: int, otp_id: str, rental_id: int, us
                         user.balance += refund
                         rental.refunded = True
                         rental.refund_amount = refund
-                        rental.refunded_at = datetime.now()
+                        rental.refunded_at = now
 
                         if user.balance == expected_balance:
 
-                            if datetime.now() >= rental.expires_at:
+                            if now >= rental.expires_at:
                                 rental.status = 'expired'
 
-                            rental.updated_at = datetime.now()
+                            rental.updated_at = now
 
                             try:
                                 db.session.commit()
@@ -1139,6 +1146,12 @@ async def auto_check_otp_task(bot, chat_id: int, otp_id: str, rental_id: int, us
                 
                 if rental and rental.status == 'waiting' and not rental.refunded and not rental.otp_code:
 
+                    # ===== KIỂM TRA THỜI GIAN TRƯỚC KHI HOÀN =====
+                    now = datetime.now()
+                    if now < rental.expires_at:
+                        logger.info(f"⏳ Rental {rental_id} chưa hết hạn, không hoàn tiền (end of loop)")
+                        return
+
                     user = User.query.filter_by(user_id=rental.user_id).with_for_update().first()
                     
                     if user:
@@ -1150,7 +1163,7 @@ async def auto_check_otp_task(bot, chat_id: int, otp_id: str, rental_id: int, us
                         rental.status = 'expired'
                         rental.refunded = True
                         rental.refund_amount = refund
-                        rental.refunded_at = datetime.now()
+                        rental.refunded_at = now
                         
                         try:
                             db.session.commit()
