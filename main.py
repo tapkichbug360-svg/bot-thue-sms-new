@@ -611,9 +611,9 @@ def api_sync_bidirectional():
                 balance = int(balance)
 
                 # ===== FIX: KHÔNG GHI ĐÈ BALANCE KHI NHỎ HƠN =====
-                if balance > old_balance:
+                if balance != old_balance:
                     amount_diff = balance - old_balance
-                    user.balance += amount_diff
+                    user.balance = balance
                     user.last_active = get_vn_time()
 
                     if username:
