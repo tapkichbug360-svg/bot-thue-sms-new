@@ -451,8 +451,6 @@ async def rent_network_callback(update: Update, context: Context):
         reply_markup
     )
 
-# (các hàm rent_service_callback, rent_network_callback giữ nguyên như code cũ của bạn)
-
 async def rent_confirm_callback(update: Update, context: Context):
     query = update.callback_query
     await safe_answer_callback(query, "⏳ Đang xử lý...")
@@ -474,6 +472,7 @@ async def rent_confirm_callback(update: Update, context: Context):
     user = update.effective_user
 
     with app.app_context():
+        # Lấy user với khóa để tránh xung đột
         db_user = User.query.filter_by(user_id=user.id).with_for_update().first()
 
         if not db_user:
@@ -541,7 +540,9 @@ async def rent_confirm_callback(update: Update, context: Context):
             sim_id = sim_data.get('simId')
             actual_price = sim_data.get('payment', final_price - 1000)
 
+            # TẠO SESSION MỚI CHO CÁC THAO TÁC DB
             with app.app_context():
+                # Kiểm tra số đã tồn tại
                 existing = Rental.query.filter(
                     Rental.phone_number == phone,
                     Rental.status.in_(['waiting', 'completed'])
@@ -550,9 +551,12 @@ async def rent_confirm_callback(update: Update, context: Context):
                     await loading_msg.edit_text("❌ **SỐ NÀY ĐÃ ĐƯỢC CẤP**\n\nVui lòng thử lại sau.")
                     return
 
-                db.session.refresh(db_user)
+                # LẤY LẠI USER (ĐẢM BẢO TRONG SESSION HIỆN TẠI)
+                db_user = User.query.filter_by(user_id=user.id).with_for_update().first()
+                
+                # KIỂM TRA SỐ DƯ LẦN CUỐI
                 if db_user.balance < final_price:
-                    await loading_msg.edit_text("❌ **SỐ DƯ KHÔNG ĐỦ** (đã thay đổi)")
+                    await loading_msg.edit_text("❌ **SỐ DƯ KHÔNG ĐỦ**\n\nSố dư đã thay đổi, vui lòng thử lại.")
                     return
 
                 rent_info = context.user_data.get('rent', {})
@@ -560,6 +564,7 @@ async def rent_confirm_callback(update: Update, context: Context):
                     await loading_msg.edit_text("❌ **LỖI SESSION**\n\nChọn lại từ đầu.")
                     return
 
+                # TẠO RENTAL MỚI
                 rental = Rental(
                     user_id=user.id,
                     service_id=int(service_id),
@@ -575,17 +580,20 @@ async def rent_confirm_callback(update: Update, context: Context):
                 )
                 db.session.add(rental)
 
+                # CẬP NHẬT USER
                 db_user.balance -= final_price
                 db_user.total_spent += final_price
                 db_user.total_rentals += 1
                 db_user.updated_at = get_vn_time()
 
+                # COMMIT - LƯU TẤT CẢ
                 db.session.commit()
-                db.session.refresh(db_user)
 
+                # XÓA SESSION DATA
                 if 'rent' in context.user_data:
                     del context.user_data['rent']
 
+                # TẠO KEYBOARD
                 keyboard = [
                     [InlineKeyboardButton(f"📞 {phone} - {rent_info['service_name']}", callback_data=f"rent_view_{rental.id}")],
                     [InlineKeyboardButton("📋 DANH SÁCH SỐ", callback_data="menu_rent_list")],
@@ -603,6 +611,7 @@ async def rent_confirm_callback(update: Update, context: Context):
                     parse_mode='Markdown'
                 )
 
+                # TẠO TASK AUTO-CHECK OTP
                 task = asyncio.create_task(
                     auto_check_otp_task(
                         context.bot,
