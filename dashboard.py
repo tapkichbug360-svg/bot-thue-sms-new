@@ -1984,11 +1984,10 @@ def add_money():
         db.session.add(transaction)
         db.session.commit()
         
-        # ===== ĐỒNG BỘ LÊN SEPAY (THÊM MỚI) =====
+        # ===== ĐỒNG BỘ LÊN SEPAY =====
         try:
-            SEPAY_URL = os.getenv('SEPAY_URL', 'https://bot-thue-sms-sepay.onrender.com')  # URL của SePay bot
+            SEPAY_URL = os.getenv('SEPAY_URL', 'https://bot-thue-sms-sepay.onrender.com')
             
-            # Gửi đồng bộ lên SePay
             sync_data = {
                 'type': 'manual_transaction',
                 'user_id': user.user_id,
@@ -1999,7 +1998,6 @@ def add_money():
                 'timestamp': datetime.now().isoformat()
             }
             
-            # Gửi đến SePay
             response = requests.post(
                 f"{SEPAY_URL}/api/receive-sync",
                 json=sync_data,
@@ -2010,9 +2008,10 @@ def add_money():
                 logger.info(f"✅ Đã đồng bộ cộng tiền lên SePay")
             else:
                 logger.warning(f"⚠️ Đồng bộ SePay thất bại: {response.status_code}")
-                
-            # Đồng bộ lên Render như cũ
+            
+            # ===== SỬA LỖI RESET BALANCE =====
             RENDER_URL = "https://bot-thue-sms-new.onrender.com"
+            
             push_data = {
                 'user_id': user.user_id,
                 'balance': user.balance,
@@ -2020,7 +2019,7 @@ def add_money():
             }
             
             response = requests.post(
-                f"{RENDER_URL}/api/update-balance",
+                f"{RENDER_URL}/api/sync-bidirectional",
                 json=push_data,
                 timeout=5
             )
