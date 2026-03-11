@@ -69,8 +69,6 @@ def sync_to_render(user_data):
         
         # Đồng bộ qua nhiều API để đảm bảo thành công
         apis = [
-            f"{RENDER_URL}/api/sync-bidirectional",
-            f"{RENDER_URL}/api/force-sync-user",
             f"{RENDER_URL}/api/update-balance"
         ]
         

@@ -2105,7 +2105,7 @@ def deduct_money():
             }
             
             requests.post(
-                f"{RENDER_URL}/api/sync-bidirectional",
+                f"{RENDER_URL}/api/update-balance",
                 json=push_data,
                 timeout=5
             )
