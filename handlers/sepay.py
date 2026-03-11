@@ -267,15 +267,15 @@ def sync_bidirectional():
 
                     old = user.balance
 
-                    # CHỈ UPDATE KHI BALANCE RENDER LỚN HƠN
-                    if balance > old:
+                    # CHỈ UPDATE KHI BALANCE KHÁC
+                    if balance != old:
                         user.balance = balance
                         logger.info(
                             f"🔄 Đồng bộ balance từ Render: {user_id} {old} → {balance}"
                         )
                     else:
                         logger.info(
-                            f"⏭️ Bỏ qua sync vì balance Render nhỏ hơn hoặc bằng ({balance} ≤ {old})"
+                            f"⏭️ Bỏ qua sync vì balance không thay đổi ({balance})"
                         )
 
             db.session.commit()
