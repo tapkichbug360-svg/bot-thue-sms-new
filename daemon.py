@@ -352,6 +352,7 @@ class UserSyncDaemon:
     def pull_user_from_render(self, user_id):
         """
         KÉO USER TỪ RENDER VỀ - CHỈ DÙNG check-user, KHÔNG TẠO USER MỚI
+        ĐÃ SỬA: Chỉ cập nhật khi Render CAO HƠN và có diff hợp lý
         """
         try:
             self.log(f"📥 Đang kéo user {user_id} từ Render về...", "INFO")
@@ -378,24 +379,35 @@ class UserSyncDaemon:
                 if data.get('direct_update') and data.get('new_balance') is not None:
                     render_balance = int(data.get('new_balance'))
                     
-                    # CHỈ UPDATE KHI RENDER LỚN HƠN
-                    if render_balance != local_balance:
+                    # ===== CHỈ UPDATE KHI RENDER CAO HƠN LOCAL =====
+                    if render_balance > local_balance:
                         
                         diff = render_balance - local_balance
                         
-                        self.update_local_balance(user_id, render_balance)
-                        
-                        self.log(
-                            f"🔄 Đồng bộ balance {user_id}: {local_balance} → {render_balance}",
-                            "SUCCESS"
-                        )
-                        
-                        # Gửi thông báo
-                        if diff > 0:
+                        # KIỂM TRA DIFF HỢP LÝ (tránh số âm hoặc quá lớn)
+                        if diff > 0 and diff < 10000000:  # Giới hạn 10M cho an toàn
+                            self.update_local_balance(user_id, render_balance)
+                            
+                            self.log(
+                                f"🔄 Đồng bộ balance {user_id}: {local_balance} → {render_balance} (+{diff})",
+                                "SUCCESS"
+                            )
+                            
+                            # Gửi thông báo nạp tiền
                             self.send_telegram_notification(user_id, render_balance, diff, "NAP")
                         else:
-                            self.send_telegram_notification(user_id, render_balance, diff, "TIÊU")
+                            self.log(
+                                f"⚠️ Diff bất thường {diff}, bỏ qua cập nhật",
+                                "WARNING"
+                            )
                     
+                    elif render_balance < local_balance:
+                        self.log(
+                            f"⏭️ Giữ local {local_balance} (Render thấp hơn: {render_balance})",
+                            "INFO"
+                        )
+                        # KHÔNG cập nhật - giữ số dư đúng từ local
+                        
                     else:
                         self.log(f"✅ User {user_id}: Đã đồng bộ {local_balance}đ", "SUCCESS")
                     
