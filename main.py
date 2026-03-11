@@ -590,6 +590,7 @@ def api_reset_cache():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 # ===== API 10: ĐỒNG BỘ 2 CHIỀU + UPDATE BALANCE TRỰC TIẾP =====
+# ===== API 10: ĐỒNG BỘ 2 CHIỀU + UPDATE BALANCE TRỰC TIẾP =====
 @app.route('/api/sync-bidirectional', methods=['POST'])
 def api_sync_bidirectional():
     try:
@@ -613,6 +614,8 @@ def api_sync_bidirectional():
                 # ===== FIX: KHÔNG GHI ĐÈ BALANCE KHI NHỎ HƠN =====
                 if balance != old_balance:
                     amount_diff = balance - old_balance
+                    
+                    # CHỈ CẬP NHẬT KHI CÓ THAY ĐỔI
                     user.balance = balance
                     user.last_active = get_vn_time()
 
@@ -622,33 +625,41 @@ def api_sync_bidirectional():
                     db.session.commit()
 
                     logger.info(
-                        f"💰 DIRECT UPDATE: User {user_id}: {old_balance}đ → {user.balance}đ (+{amount_diff})"
+                        f"💰 DIRECT UPDATE: User {user_id}: {old_balance}đ → {user.balance}đ ({amount_diff:+,}đ)"
                     )
 
-                    # CHỈ TẠO TRANSACTION NẾU SỐ TIỀN THAY ĐỔI
+                    # TẠO TRANSACTION NẾU CÓ THAY ĐỔI
                     if amount_diff != 0:
                         import secrets
                         millis = int(time.time() * 1000)
                         random_suffix = secrets.token_hex(2).upper()
-                        trans_code = f"DIRECT_{millis}_{random_suffix}"
+                        trans_code = f"SYNC_{millis}_{random_suffix}"
+
+                        # XÁC ĐỊNH LOẠI GIAO DỊCH
+                        trans_type = 'deposit' if amount_diff > 0 else 'deduct'
+                        abs_amount = abs(amount_diff)
 
                         transaction = Transaction(
                             user_id=user.id,
-                            amount=amount_diff,
-                            type='adjustment',
+                            amount=abs_amount,  # LUÔN DƯƠNG
+                            type=trans_type,    # 'deposit' hoặc 'deduct'
                             status='success',
                             transaction_code=trans_code,
-                            description=f"Direct balance update from API",
+                            description=f"Balance sync from {'Render' if amount_diff > 0 else 'Local'}",
                             created_at=get_vn_time()
                         )
                         db.session.add(transaction)
                         db.session.commit()
 
-                        logger.info(f"✅ Đã tạo transaction {trans_code}: +{amount_diff:,}đ")
+                        # LOG ĐÚNG DẤU
+                        if amount_diff > 0:
+                            logger.info(f"✅ Đã tạo transaction {trans_code}: +{abs_amount:,}đ")
+                        else:
+                            logger.info(f"✅ Đã tạo transaction {trans_code}: -{abs_amount:,}đ")
 
                 else:
                     logger.info(
-                        f"⏭️ Bỏ qua sync vì balance Render nhỏ hơn hoặc bằng ({balance} ≤ {old_balance})"
+                        f"⏭️ Bỏ qua sync vì balance không đổi ({balance} = {old_balance})"
                     )
 
                 return jsonify({
@@ -657,6 +668,7 @@ def api_sync_bidirectional():
                     "user_id": user.user_id,
                     "old_balance": old_balance,
                     "new_balance": user.balance,
+                    "amount_diff": amount_diff if 'amount_diff' in locals() else 0,
                     "message": "Balance updated successfully"
                 }), 200
             
