@@ -45,7 +45,7 @@ async def update_balance_cache(user_id, new_balance):
     balance_cache_time[user_id] = time.time()
 
 async def sync_balance_from_render(user_id):
-    """Đồng bộ balance từ Render - ƯU TIÊN LẤY TỪ RENDER"""
+    """Đồng bộ balance từ Render - SO SÁNH LẤY GIÁ TRỊ CAO NHẤT"""
     try:
         response = requests.post(
             f"{RENDER_URL}/api/check-user",
@@ -60,13 +60,31 @@ async def sync_balance_from_render(user_id):
             with app.app_context():
                 user = User.query.filter_by(user_id=user_id).first()
                 if user:
-                    if user.balance != render_balance:
-                        old_balance = user.balance
+                    local_balance = user.balance
+                    
+                    # ===== SO SÁNH THÔNG MINH =====
+                    if render_balance > local_balance:
+                        # Render cao hơn (có giao dịch từ SePay)
                         user.balance = render_balance
                         db.session.commit()
-                        logger.info(f"🔄 Đồng bộ user {user_id}: {old_balance}đ → {render_balance}đ")
+                        logger.info(f"📥 Cập nhật từ Render: {local_balance} → {render_balance} (+{render_balance-local_balance})")
                         await update_balance_cache(user_id, render_balance)
-                    return render_balance
+                        return render_balance
+                        
+                    elif render_balance < local_balance:
+                        # Local cao hơn (vừa có giao dịch thuê/hủy/hoàn)
+                        logger.info(f"📤 Local cao hơn Render: {local_balance} > {render_balance}")
+                        # Đẩy local lên Render
+                        await push_balance_to_render(user_id, local_balance, user.username)
+                        await update_balance_cache(user_id, local_balance)
+                        return local_balance
+                        
+                    else:
+                        # Bằng nhau
+                        logger.info(f"✅ Đã đồng bộ: {local_balance}")
+                        await update_balance_cache(user_id, local_balance)
+                        return local_balance
+                        
                 else:
                     # Tạo user mới nếu chưa có
                     new_user = User(
@@ -88,6 +106,30 @@ async def sync_balance_from_render(user_id):
         logger.error(f"❌ Lỗi sync từ Render: {e}")
     
     return None
+
+async def push_balance_to_render(user_id, balance, username):
+    """Đẩy balance local lên Render"""
+    try:
+        response = requests.post(
+            f"{RENDER_URL}/api/sync-bidirectional",
+            json={
+                'user_id': user_id,
+                'balance': balance,
+                'username': username
+            },
+            timeout=5
+        )
+        
+        if response.status_code == 200:
+            logger.info(f"✅ Đã đẩy {balance}đ lên Render cho user {user_id}")
+            return True
+        else:
+            logger.warning(f"⚠️ Push lên Render thất bại: {response.status_code}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"❌ Lỗi push lên Render: {e}")
+        return False
 
 async def balance_command(update: Update, context: Context):
     """Xem số dư tài khoản - LUÔN LẤY TỪ RENDER TRƯỚC"""

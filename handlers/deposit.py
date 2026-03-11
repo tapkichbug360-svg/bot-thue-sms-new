@@ -288,7 +288,7 @@ async def deposit_amount_callback(update: Update, context: Context):
         await safe_send_message(update, "❌ Có lỗi xảy ra! Vui lòng thử lại.")
 
 async def deposit_check_callback(update: Update, context: Context):
-    """Xử lý khi user bấm 'TÔI ĐÃ CHUYỂN KHOẢN' - TỐI ƯU HÓA"""
+    """Xử lý khi user bấm 'TÔI ĐÃ CHUYỂN KHOẢN' - FIX LỖI EDIT"""
     query = update.callback_query
     await safe_answer_callback(query, "📝 Đang ghi nhận...")
     
@@ -296,11 +296,19 @@ async def deposit_check_callback(update: Update, context: Context):
         transaction_code = query.data.split('_')[2]
         logger.info(f"💰 User báo đã chuyển khoản - Mã GD: {transaction_code}")
         
-        # Hiển thị loading
-        await query.edit_message_text(
-            text="⏳ **ĐANG XỬ LÝ...**\n\nVui lòng chờ trong giây lát.",
-            parse_mode='Markdown'
-        )
+        # ===== FIX: KIỂM TRA TRƯỚC KHI EDIT =====
+        try:
+            await query.edit_message_text(
+                text="⏳ **ĐANG XỬ LÝ...**\n\nVui lòng chờ trong giây lát.",
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.warning(f"Không thể edit message: {e}")
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="⏳ **ĐANG XỬ LÝ...**\n\nVui lòng chờ trong giây lát.",
+                parse_mode='Markdown'
+            )
         
         with app.app_context():
             transaction = Transaction.query.filter_by(
