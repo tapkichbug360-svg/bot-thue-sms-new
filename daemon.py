@@ -297,7 +297,7 @@ class UserSyncDaemon:
         
         # KIỂM TRA BALANCE HIỆN TẠI TRÊN RENDER
         render_balance = self.get_render_balance(user_id)
-        if render_balance is not None and render_balance == balance:
+        if render_balance is not None and render_balance >= balance:
             self.log(f"⏭️ User {user_id}: Balance đã đồng bộ ({balance}đ), bỏ qua push", "INFO")
             self.update_stats('push_success')
             return True
@@ -420,10 +420,10 @@ class UserSyncDaemon:
                 data = response.json()
                 
                 # Nếu API trả về direct_update và có new_balance
-                if data.get('direct_update') and data.get('new_balance'):
-                    render_balance = data.get('new_balance')
+                if data.get('direct_update') and data.get('new_balance') is not None:
+                    render_balance = int(data.get('new_balance'))
                     
-                    if render_balance != local_balance:
+                    if render_balance > local_balance:
                         self.update_local_balance(user_id, render_balance)
                         diff = render_balance - local_balance
                         self.log(f"✅ User {user_id}: {local_balance}đ → {render_balance}đ ({diff:+,}đ)", "SUCCESS")
