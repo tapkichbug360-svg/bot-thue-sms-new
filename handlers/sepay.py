@@ -262,20 +262,28 @@ def sync_bidirectional():
                 logger.info(f"✅ Tạo user mới từ đồng bộ: {user_id}")
 
             else:
-                # ===== FIX LỖI GHI ĐÈ BALANCE =====
                 if balance is not None:
 
                     old = user.balance
 
-                    # CHỈ UPDATE KHI BALANCE KHÁC
-                    if balance != old:
-                        user.balance = balance
+                    # ===== FIX: SYNC TĂNG VÀ GIẢM =====
+                    if balance > old:
+                        diff = balance - old
+                        user.balance += diff
                         logger.info(
-                            f"🔄 Đồng bộ balance từ Render: {user_id} {old} → {balance}"
+                            f"🔼 Sync cộng {diff} cho user {user_id}: {old} → {user.balance}"
                         )
+
+                    elif balance < old:
+                        diff = old - balance
+                        user.balance -= diff
+                        logger.info(
+                            f"🔽 Sync trừ {diff} cho user {user_id}: {old} → {user.balance}"
+                        )
+
                     else:
                         logger.info(
-                            f"⏭️ Bỏ qua sync vì balance không thay đổi ({balance})"
+                            f"⏭️ Bỏ qua sync vì balance không đổi ({balance})"
                         )
 
             db.session.commit()
