@@ -1507,6 +1507,24 @@ async def rent_cancel_callback(update: Update, context: Context):
             db.session.refresh(user)
             db.session.refresh(rental)
             
+            # ===== PUSH LÊN RENDER NGAY SAU KHI HOÀN TIỀN =====
+            try:
+                RENDER_URL = os.getenv('RENDER_URL', 'https://bot-thue-sms-new.onrender.com')
+                push_data = {
+                    'user_id': user.user_id,
+                    'balance': user.balance,
+                    'username': user.username or f"user_{user.user_id}"
+                }
+                # Gửi request (không cần chờ kết quả)
+                requests.post(
+                    f"{RENDER_URL}/api/sync-bidirectional",
+                    json=push_data,
+                    timeout=2
+                )
+                logger.info(f"📤 Đã push balance {user.balance}đ lên Render sau khi hủy")
+            except Exception as e:
+                logger.error(f"❌ Lỗi push lên Render: {e}")
+            
             keyboard = [
                 [InlineKeyboardButton("🆕 THUÊ TIẾP", callback_data="menu_rent")],
                 [InlineKeyboardButton("💰 XEM SỐ DƯ", callback_data="menu_balance")],

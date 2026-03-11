@@ -222,6 +222,24 @@ def check_expired_rentals():
 
                     logger.info(f"💰 TỰ ĐỘNG HOÀN {refund}đ CHO USER {user.user_id}")
                     
+                    # ===== PUSH LÊN RENDER NGAY =====
+                    try:
+                        RENDER_URL = os.getenv('RENDER_URL', 'https://bot-thue-sms-new.onrender.com')
+                        push_data = {
+                            'user_id': user.user_id,
+                            'balance': user.balance,
+                            'username': user.username or f"user_{user.user_id}"
+                        }
+                        requests.post(
+                            f"{RENDER_URL}/api/sync-bidirectional",
+                            json=push_data,
+                            timeout=2
+                        )
+                        logger.info(f"📤 Push sau hoàn: {user.balance}đ")
+                    except Exception as e:
+                        logger.error(f"❌ Lỗi push: {e}")
+                    
+                    # Gửi Telegram
                     if BOT_TOKEN:
                         try:
                             bot = Bot(token=BOT_TOKEN)
