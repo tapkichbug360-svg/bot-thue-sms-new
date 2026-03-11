@@ -243,12 +243,13 @@ def sync_bidirectional():
         data = request.json
         user_id = data.get('user_id')
         balance = data.get('balance')
-        
+
         if not user_id:
             return jsonify({'success': False, 'error': 'Thiếu user_id'}), 400
-        
+
         with app.app_context():
             user = User.query.filter_by(user_id=user_id).first()
+
             if not user:
                 # Tạo user mới nếu chưa có
                 user = User(
@@ -259,21 +260,32 @@ def sync_bidirectional():
                 )
                 db.session.add(user)
                 logger.info(f"✅ Tạo user mới từ đồng bộ: {user_id}")
+
             else:
-                # Cập nhật balance
+                # ===== FIX LỖI GHI ĐÈ BALANCE =====
                 if balance is not None:
+
                     old = user.balance
-                    user.balance = balance
-                    logger.info(f"✅ Cập nhật balance từ Render: {user_id} {old} → {balance}")
-            
+
+                    # CHỈ UPDATE KHI BALANCE RENDER LỚN HƠN
+                    if balance > old:
+                        user.balance = balance
+                        logger.info(
+                            f"🔄 Đồng bộ balance từ Render: {user_id} {old} → {balance}"
+                        )
+                    else:
+                        logger.info(
+                            f"⏭️ Bỏ qua sync vì balance Render nhỏ hơn hoặc bằng ({balance} ≤ {old})"
+                        )
+
             db.session.commit()
-            
+
             return jsonify({
                 'success': True,
                 'user_id': user.user_id,
                 'balance': user.balance
             })
-            
+
     except Exception as e:
         logger.error(f"❌ Lỗi sync_bidirectional: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
