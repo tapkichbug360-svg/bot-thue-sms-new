@@ -403,16 +403,12 @@ def setup_sepay_webhook(app):
                 logger.info(f"👤 USER: {target_user.user_id}, Username: {target_user.username}")
                 logger.info(f"💰 BALANCE HIỆN TẠI TRONG DB: {target_user.balance}")
                 
-                # ===== XỬ LÝ GIAO DỊCH - LUÔN CỘNG TIỀN =====
+                # ===== XỬ LÝ GIAO DỊCH - CỘNG DỒN, KHÔNG GHI ĐÈ =====
                 old_balance = target_user.balance
 
-                # LUÔN CỘNG TIỀN - KHÔNG BAO GIỜ BỎ QUA
+                # ===== QUAN TRỌNG: CỘNG DỒN SỐ DƯ =====
                 target_user.balance += amount
-                logger.info(f"💰 ĐÃ CỘNG {amount} VÀO BALANCE: {old_balance} → {target_user.balance}")
-                
-                # KIỂM TRA BẰNG LOG CẤP CAO NHẤT
-                print(f"🔴🔴🔴 KIỂM TRA: ĐÃ CỘNG {amount}, BALANCE={target_user.balance}")
-                logger.critical(f"🔴🔴🔴 KIỂM TRA: ĐÃ CỘNG {amount}, BALANCE={target_user.balance}")
+                logger.info(f"💰 ĐÃ CỘNG DỒN {amount} VÀO BALANCE: {old_balance} → {target_user.balance}")
 
                 # XỬ LÝ TRANSACTION - TẠO MỚI CHO MỖI LẦN NẠP
                 if not transaction:
@@ -456,7 +452,7 @@ def setup_sepay_webhook(app):
                 # ===== BƯỚC 1: CẬP NHẬT LOCAL =====
                 try:
                     db.session.commit()
-                    logger.info(f"✅ LOCAL UPDATE: User {target_user.user_id}: {old_balance}đ → {target_user.balance}đ")
+                    logger.info(f"✅ LOCAL UPDATE: User {target_user.user_id}: {old_balance}đ → {target_user.balance}đ (+{amount}đ)")
                     
                     # ===== BƯỚC 2: PUSH LÊN RENDER VỚI RETRY =====
                     push_success = False
@@ -483,7 +479,7 @@ def setup_sepay_webhook(app):
                             else:
                                 logger.warning(f"⚠️ Push lần {attempt+1} thất bại: {response.status_code}")
                                 if attempt < 4:
-                                    time.sleep(2 ** attempt)  # 1,2,4,8 giây
+                                    time.sleep(2 ** attempt)
                                     
                         except Exception as e:
                             logger.error(f"❌ Lỗi push lần {attempt+1}: {e}")
@@ -491,7 +487,6 @@ def setup_sepay_webhook(app):
                                 time.sleep(2 ** attempt)
                     
                     if not push_success:
-                        # Lưu vào file để retry sau
                         save_failed_push_sepay(target_user.user_id, target_user.balance, target_user.username)
                         logger.error(f"❌ Push thất bại sau 5 lần - Đã lưu để retry")
                         
@@ -549,6 +544,35 @@ def setup_sepay_webhook(app):
             import traceback
             traceback.print_exc()
             return jsonify({"success": False}), 500
+
+    # ===== HÀM LƯU PUSH THẤT BẠI CHO SEPAY =====
+    def save_failed_push_sepay(user_id, balance, username):
+        """Lưu push thất bại từ SePay"""
+        try:
+            failed_file = 'failed_pushes_sepay.json'
+            failed = []
+            if os.path.exists(failed_file):
+                with open(failed_file, 'r') as f:
+                    failed = json.load(f)
+            
+            failed.append({
+                'user_id': user_id,
+                'balance': balance,
+                'username': username,
+                'time': datetime.now().isoformat(),
+                'source': 'sepay'
+            })
+            
+            if len(failed) > 50:
+                failed = failed[-50:]
+            
+            with open(failed_file, 'w') as f:
+                json.dump(failed, f, indent=2)
+            
+            logger.info(f"💾 Đã lưu push thất bại SePay của user {user_id}")
+            
+        except Exception as e:
+            logger.error(f"❌ Lỗi lưu failed push SePay: {e}")
 
     # ===== HÀM LƯU PUSH THẤT BẠI CHO SEPAY =====
     def save_failed_push_sepay(user_id, balance, username):
