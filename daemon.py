@@ -23,6 +23,7 @@ class UserSyncDaemon:
     def __init__(self):
         self.running = True
         self.last_sync = {}
+        self.pending_sync = set()
         self.failed_pushes_file = "failed_pushes.json"
         self.db_path = os.path.join('database', 'bot.db')
         
@@ -257,9 +258,16 @@ class UserSyncDaemon:
                     f"• **Số dư mới:** {new_balance:,}đ\n"
                     f"• **Thời gian:** {current_time}"
                 )
+            elif type == "DEDUCT":
+                message = (
+                    f"💸 **TRỪ TIỀN THÀNH CÔNG!**\n\n"
+                    f"• **Số tiền:** -{amount:,}đ\n"
+                    f"• **Số dư mới:** {new_balance:,}đ\n"
+                    f"• **Thời gian:** {current_time}"
+                )
             else:
                 message = (
-                    f"💸 **CẬP NHẬT SỐ DƯ**\n\n"
+                    f"🔄 **CẬP NHẬT SỐ DƯ**\n\n"
                     f"• **Biến động:** {amount:+,}đ\n"
                     f"• **Số dư mới:** {new_balance:,}đ\n"
                     f"• **Thời gian:** {current_time}"
@@ -317,14 +325,14 @@ class UserSyncDaemon:
     
     # ==================== ĐẨY DỮ LIỆU LÊN RENDER ====================
     def pull_user_from_render(self, user_id):
-        """Kéo user từ Render về - PHÁT HIỆN THAY ĐỔI 2 CHIỀU"""
         try:
-            self.log(f"📥 Đang kéo user {user_id} từ Render về...", "INFO")
-            
-            # Lấy balance hiện tại từ local
             local_balance = self.get_user_balance(user_id)
             
-            # Gọi API check-user
+            # Kiểm tra xem user này có đang chờ sync không
+            if user_id in self.pending_sync:
+                self.log(f"⏳ User {user_id} đang chờ sync, bỏ qua pull", "INFO")
+                return True
+            
             response = requests.post(
                 f"{RENDER_URL}/api/check-user",
                 json={'user_id': user_id},
@@ -338,30 +346,28 @@ class UserSyncDaemon:
                 if render_balance is None:
                     return False
                 
-                # ===== SO SÁNH VÀ XỬ LÝ =====
                 if render_balance > local_balance:
-                    # Render cao hơn (do nạp từ SePay)
+                    # Render cao hơn (nạp tiền)
                     self.update_local_balance(user_id, render_balance)
                     diff = render_balance - local_balance
-                    self.log(f"📥 Cập nhật local từ Render: {local_balance} → {render_balance} (+{diff})", "SUCCESS")
+                    self.send_telegram_notification(user_id, render_balance, diff, "NAP")
                     
                 elif render_balance < local_balance:
-                    # Local cao hơn (do trừ tiền từ dashboard)
-                    self.log(f"⚠️ Local cao hơn Render: {local_balance} > {render_balance}", "WARNING")
-                    self.push_user_to_render(user_id, local_balance, f"user_{user_id}", "sync_from_daemon")
+                    # Local cao hơn (trừ tiền) - KIỂM TRA THÊM
+                    time_since_sync = time.time() - self.last_sync.get(user_id, 0)
+                    if time_since_sync < 10:  # Nếu mới sync trong 10 giây
+                        self.log(f"⏳ User {user_id} vừa sync, chờ Render cập nhật", "INFO")
+                        self.pending_sync.add(user_id)
+                    else:
+                        self.log(f"⚠️ Local cao hơn Render: {local_balance} > {render_balance}", "WARNING")
+                        self.push_user_to_render(user_id, local_balance, f"user_{user_id}", "sync_from_daemon")
+                        self.last_sync[user_id] = time.time()
                     
-                else:
-                    self.log(f"✅ User {user_id}: Đã đồng bộ {local_balance}đ", "INFO")
-                
                 return True
-            else:
-                self.log(f"⚠️ check-user lỗi {response.status_code}", "WARNING")
-                return False
-                
         except Exception as e:
-            self.log(f"❌ Lỗi pull user {user_id}: {e}", "ERROR")
+            self.log(f"❌ Lỗi: {e}", "ERROR")
             return False
-    
+        
     def push_user_batch(self, users):
         """Đẩy nhiều user song song - LỌC USER CÓ BALANCE > 0"""
         if not users:
