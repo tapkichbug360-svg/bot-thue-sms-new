@@ -12,6 +12,7 @@ import requests
 import threading
 import time
 import json
+import secrets
 
 logger = logging.getLogger(__name__)
 
@@ -279,7 +280,7 @@ def sync_bidirectional():
         logger.error(f"❌ Lỗi sync_bidirectional: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
-# ===== WEBHOOK CHÍNH - ĐÃ SỬA LỖI =====
+# ===== WEBHOOK CHÍNH - ĐÃ FIX LỖI NẠP NHIỀU LẦN =====
 def setup_sepay_webhook(app):
     @app.route('/webhook/sepay', methods=['POST'])
     def sepay_webhook():
@@ -383,20 +384,20 @@ def setup_sepay_webhook(app):
                 logger.info(f"👤 USER: {target_user.user_id}, Username: {target_user.username}")
                 logger.info(f"💰 BALANCE HIỆN TẠI TRONG DB: {target_user.balance}")
                 
-                # ===== XỬ LÝ GIAO DỊCH - CÁCH ĐƠN GIẢN NHẤT =====
+                # ===== XỬ LÝ GIAO DỊCH - LUÔN CỘNG TIỀN =====
                 old_balance = target_user.balance
 
                 # LUÔN CỘNG TIỀN - KHÔNG BAO GIỜ BỎ QUA
                 target_user.balance += amount
                 logger.info(f"💰 ĐÃ CỘNG {amount} VÀO BALANCE: {old_balance} → {target_user.balance}")
-
+                
                 # KIỂM TRA BẰNG LOG CẤP CAO NHẤT
                 print(f"🔴🔴🔴 KIỂM TRA: ĐÃ CỘNG {amount}, BALANCE={target_user.balance}")
                 logger.critical(f"🔴🔴🔴 KIỂM TRA: ĐÃ CỘNG {amount}, BALANCE={target_user.balance}")
 
-                # XỬ LÝ TRANSACTION (CHỈ ĐỂ LƯU LỊCH SỬ)
+                # XỬ LÝ TRANSACTION - TẠO MỚI CHO MỖI LẦN NẠP
                 if not transaction:
-                    # Tạo mới
+                    # Tạo transaction mới
                     transaction = Transaction(
                         user_id=target_user.id,
                         amount=amount,
@@ -411,7 +412,11 @@ def setup_sepay_webhook(app):
                     logger.info(f"✅ TẠO TRANSACTION MỚI: {transaction_code}")
                 else:
                     # TẠO TRANSACTION MỚI CHO LẦN NẠP NÀY (KHÔNG CỘNG DỒN)
-                    new_code = f"{transaction_code}_{int(time.time())}"[-20:]  # Giới hạn độ dài
+                    # Thêm timestamp và random để tránh trùng mã
+                    timestamp = int(time.time() * 1000)
+                    random_suffix = secrets.token_hex(2).upper()
+                    new_code = f"{transaction_code}_{timestamp}_{random_suffix}"[-50:]  # Giới hạn độ dài
+                    
                     new_transaction = Transaction(
                         user_id=target_user.id,
                         amount=amount,
@@ -424,6 +429,10 @@ def setup_sepay_webhook(app):
                     )
                     db.session.add(new_transaction)
                     logger.info(f"✅ TẠO TRANSACTION MỚI CHO LẦN NẠP THỨ {transaction.amount + 1}: {new_code}")
+                    
+                    # Cập nhật để dùng transaction mới cho phần sau
+                    transaction = new_transaction
+
                 # Cập nhật thời gian
                 target_user.last_active = current_time
 
@@ -446,7 +455,7 @@ def setup_sepay_webhook(app):
                         f"💰 **NẠP TIỀN THÀNH CÔNG!**\n\n"
                         f"• **Số tiền:** +{amount:,}đ\n"
                         f"• **Số dư mới:** {target_user.balance:,}đ\n"
-                        f"• **Mã GD:** `{transaction_code}`\n"
+                        f"• **Mã GD:** `{transaction.transaction_code}`\n"
                         f"• **Thời gian:** {current_time_str}"
                     )
                     
@@ -478,7 +487,7 @@ def setup_sepay_webhook(app):
                     
                     # Chuẩn bị dữ liệu giao dịch để đồng bộ xuống Local
                     transaction_data = {
-                        'transaction_code': transaction_code,
+                        'transaction_code': transaction.transaction_code,
                         'user_id': target_user.user_id,
                         'amount': amount,
                         'type': 'deposit',
@@ -492,7 +501,7 @@ def setup_sepay_webhook(app):
                 except Exception as e:
                     logger.error(f"❌ Lỗi đồng bộ: {e}")
                 
-                logger.info(f"📌 Giao dịch {transaction_code} hoàn tất")
+                logger.info(f"📌 Giao dịch {transaction.transaction_code} hoàn tất")
 
                 return jsonify({
                     "success": True,
@@ -501,7 +510,7 @@ def setup_sepay_webhook(app):
                         "old_balance": old_balance,
                         "amount": amount,
                         "new_balance": target_user.balance,
-                        "transaction_code": transaction_code,
+                        "transaction_code": transaction.transaction_code,
                         "time": current_time.isoformat()
                     }
                 }), 200
