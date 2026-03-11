@@ -610,8 +610,8 @@ def api_sync_bidirectional():
                 
                 balance = int(balance)
 
-                # ===== FIX: KHÔNG GHI ĐÈ BALANCE KHI NHỎ HƠN =====
-                if balance != old_balance:
+                # ===== FIX: CHỈ CẬP NHẬT KHI BALANCE CAO HƠN =====
+                if balance > old_balance:
                     amount_diff = balance - old_balance
                     user.balance = balance
                     user.last_active = get_vn_time()
@@ -632,10 +632,14 @@ def api_sync_bidirectional():
                         random_suffix = secrets.token_hex(2).upper()
                         trans_code = f"DIRECT_{millis}_{random_suffix}"
 
+                        # XÁC ĐỊNH LOẠI GIAO DỊCH
+                        trans_type = 'deposit' if amount_diff > 0 else 'deduct'
+                        abs_amount = abs(amount_diff)
+
                         transaction = Transaction(
                             user_id=user.id,
-                            amount=amount_diff,
-                            type='adjustment',
+                            amount=abs_amount,  # LUÔN DƯƠNG
+                            type=trans_type,    # 'deposit' hoặc 'deduct'
                             status='success',
                             transaction_code=trans_code,
                             description=f"Direct balance update from API",
@@ -644,12 +648,18 @@ def api_sync_bidirectional():
                         db.session.add(transaction)
                         db.session.commit()
 
-                        logger.info(f"✅ Đã tạo transaction {trans_code}: +{amount_diff:,}đ")
+                        # LOG ĐÚNG DẤU
+                        if amount_diff > 0:
+                            logger.info(f"✅ Đã tạo transaction {trans_code}: +{abs_amount:,}đ")
+                        else:
+                            logger.info(f"✅ Đã tạo transaction {trans_code}: -{abs_amount:,}đ")
 
+                elif balance < old_balance:
+                    # Balance thấp hơn - BỎ QUA (daemon sẽ xử lý)
+                    logger.info(f"⏭️ Bỏ qua sync vì balance thấp hơn: {balance} < {old_balance}")
+                    
                 else:
-                    logger.info(
-                        f"⏭️ Bỏ qua sync vì balance Render nhỏ hơn hoặc bằng ({balance} ≤ {old_balance})"
-                    )
+                    logger.info(f"⏭️ Bỏ qua sync vì balance không đổi: {balance} = {old_balance}")
 
                 return jsonify({
                     "success": True,
@@ -711,7 +721,7 @@ def api_sync_bidirectional():
             
     except Exception as e:
         logger.error(f"❌ Lỗi sync bidirectional: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500 
+        return jsonify({"success": False, "error": str(e)}), 500
 
 # ===== API 11: FORCE ĐỒNG BỘ USER =====
 @app.route('/api/force-sync-user', methods=['POST'])
