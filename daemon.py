@@ -383,13 +383,9 @@ class UserSyncDaemon:
     
     # ==================== ĐẨY DỮ LIỆU LÊN RENDER ====================
     def pull_user_from_render(self, user_id):
+        """Đồng bộ từ Render về local - LẤY BALANCE CHÍNH XÁC TỪ RENDER"""
         try:
             local_balance = self.get_user_balance(user_id)
-            
-            # Kiểm tra xem user này có đang chờ sync không
-            if user_id in self.pending_sync:
-                self.log(f"⏳ User {user_id} đang chờ sync, bỏ qua pull", "INFO")
-                return True
             
             response = requests.post(
                 f"{RENDER_URL}/api/check-user",
@@ -404,27 +400,26 @@ class UserSyncDaemon:
                 if render_balance is None:
                     return False
                 
-                if render_balance > local_balance:
-                    # Render cao hơn (nạp tiền)
-                    self.update_local_balance(user_id, render_balance)
+                # ===== LUÔN CẬP NHẬT THEO RENDER (NGUỒN SỰ THẬT) =====
+                if render_balance != local_balance:
                     diff = render_balance - local_balance
-                    self.send_telegram_notification(user_id, render_balance, diff, "NAP")
+                    self.update_local_balance(user_id, render_balance)
                     
-                elif render_balance < local_balance:
-                    # Local cao hơn (trừ tiền) - KIỂM TRA THÊM
-                    time_since_sync = time.time() - self.last_sync.get(user_id, 0)
-                    if time_since_sync < 10:  # Nếu mới sync trong 10 giây
-                        self.log(f"⏳ User {user_id} vừa sync, chờ Render cập nhật", "INFO")
-                        self.pending_sync.add(user_id)
+                    if diff > 0:
+                        self.log(f"📥 Cập nhật local từ Render: +{diff}đ (local {local_balance} → {render_balance})", "SUCCESS")
                     else:
-                        self.log(f"⚠️ Local cao hơn Render: {local_balance} > {render_balance}", "WARNING")
-                        self.push_user_to_render(user_id, local_balance, f"user_{user_id}", "sync_from_daemon")
-                        self.last_sync[user_id] = time.time()
-                    
+                        self.log(f"📥 Cập nhật local từ Render: {diff}đ (local {local_balance} → {render_balance})", "INFO")
+                
                 return True
         except Exception as e:
-            self.log(f"❌ Lỗi: {e}", "ERROR")
+            self.log(f"❌ Lỗi pull user {user_id}: {e}", "ERROR")
             return False
+
+    # TẮT HOÀN TOÀN PUSH
+    def push_user_to_render(self, user_id, balance, username, reason=""):
+        """TẮT PUSH - Daemon không push, chỉ pull"""
+        self.log(f"⏭️ Daemon không push user {user_id} - Render là nguồn chính", "INFO")
+        return True
         
     def push_user_batch(self, users):
         """Đẩy nhiều user song song - LỌC USER CÓ BALANCE > 0"""

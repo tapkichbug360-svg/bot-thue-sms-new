@@ -10,6 +10,29 @@ import time
 import asyncio
 from typing import Dict
 import aiohttp
+async def push_balance_async(user_id, balance, username):
+    """Push balance lên Render bằng async - KHÔNG DÍNH VẠCH VÀNG"""
+    try:
+        RENDER_URL = os.getenv('RENDER_URL', 'https://bot-thue-sms-new.onrender.com')
+        push_data = {
+            'user_id': user_id,
+            'balance': balance,
+            'username': username
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{RENDER_URL}/api/sync-bidirectional",
+                json=push_data,
+                timeout=3
+            ) as response:
+                if response.status == 200:
+                    logger.info(f"📤 Push balance thành công: {balance}đ")
+                else:
+                    logger.warning(f"⚠️ Push thất bại: {response.status}")
+    except Exception as e:
+        logger.error(f"❌ Lỗi push: {e}")
+
 
 VN_TZ = timezone(timedelta(hours=7))
 
@@ -508,7 +531,7 @@ async def rent_network_callback(update: Update, context: Context):
     )
 
 async def rent_confirm_callback(update: Update, context: Context):
-    """Xác nhận thuê số - Gọi API lấy số (ĐÃ FIX LỖI CỘNG TRỪ KHI THUÊ LIÊN TỤC)"""
+    """Xác nhận thuê số - Gọi API lấy số (ĐÃ FIX LỖI CỘNG TRỪ KHI THUÊ LIÊN TỤC) + PUSH LÊN RENDER"""
     query = update.callback_query
     await safe_answer_callback(query, "⏳ Đang xử lý...")
     
@@ -675,6 +698,13 @@ async def rent_confirm_callback(update: Update, context: Context):
                                         
                     db.session.commit()
                     db.session.refresh(db_user)
+                    
+                    # ===== PUSH LÊN RENDER BẰNG ASYNC - KHÔNG DÍNH VẠCH VÀNG =====
+                    asyncio.create_task(push_balance_async(
+                        user.id, 
+                        db_user.balance, 
+                        user.username or f"user_{user.id}"
+                    ))
                     
                     if 'rent' in context.user_data:
                         del context.user_data['rent']
@@ -1224,7 +1254,7 @@ async def rent_view_callback(update: Update, context: Context):
 
 
 async def rent_reuse_callback(update: Update, context: Context):
-    """Thuê lại số đã từng thuê thành công"""
+    """Thuê lại số đã từng thuê thành công + PUSH LÊN RENDER"""
     query = update.callback_query
     await safe_answer_callback(query)
     
@@ -1298,7 +1328,6 @@ async def rent_reuse_callback(update: Update, context: Context):
             if response_data.get('status') == 200:
 
                 sim_data = response_data.get('data', {})
-
                 new_otp_id = sim_data.get('otpId')
                 new_sim_id = sim_data.get('simId')
                 
@@ -1339,6 +1368,14 @@ async def rent_reuse_callback(update: Update, context: Context):
 
                 try:
                     db.session.commit()
+                    
+                    # ===== PUSH LÊN RENDER BẰNG ASYNC =====
+                    asyncio.create_task(push_balance_async(
+                        user.id,
+                        db_user.balance,
+                        user.username or f"user_{user.id}"
+                    ))
+                    
                 except Exception as db_error:
                     db.session.rollback()
                     logger.error(f"DB commit error: {db_error}")
@@ -1394,9 +1431,8 @@ async def rent_reuse_callback(update: Update, context: Context):
                 "❌ **LỖI KẾT NỐI**\n\nVui lòng thử lại sau.",
                 parse_mode='Markdown'
             )
-
 async def rent_cancel_callback(update: Update, context: Context):
-    """Hủy số - SIÊU BẢO VỆ CHỐNG CỘNG SAI (ĐÃ CẬP NHẬT)"""
+    """Hủy số - SIÊU BẢO VỆ CHỐNG CỘNG SAI (ĐÃ CẬP NHẬT) + PUSH LÊN RENDER"""
     query = update.callback_query
     await safe_answer_callback(query)
     
@@ -1409,7 +1445,7 @@ async def rent_cancel_callback(update: Update, context: Context):
         await query.edit_message_text("❌ **LỖI DỮ LIỆU**")
         return
     
-    # Chờ task auto_check nếu đang chạy (an toàn hơn sleep cố định)
+    # Chờ task auto_check nếu đang chạy
     if rental_id in auto_check_tasks:
         logger.info(f"⏳ Đang có task auto-check cho rental {rental_id}, chờ kết thúc...")
         for _ in range(10):
@@ -1507,23 +1543,12 @@ async def rent_cancel_callback(update: Update, context: Context):
             db.session.refresh(user)
             db.session.refresh(rental)
             
-            # ===== PUSH LÊN RENDER NGAY SAU KHI HOÀN TIỀN =====
-            try:
-                RENDER_URL = os.getenv('RENDER_URL', 'https://bot-thue-sms-new.onrender.com')
-                push_data = {
-                    'user_id': user.user_id,
-                    'balance': user.balance,
-                    'username': user.username or f"user_{user.user_id}"
-                }
-                # Gửi request (không cần chờ kết quả)
-                requests.post(
-                    f"{RENDER_URL}/api/sync-bidirectional",
-                    json=push_data,
-                    timeout=2
-                )
-                logger.info(f"📤 Đã push balance {user.balance}đ lên Render sau khi hủy")
-            except Exception as e:
-                logger.error(f"❌ Lỗi push lên Render: {e}")
+            # ===== PUSH LÊN RENDER BẰNG ASYNC =====
+            asyncio.create_task(push_balance_async(
+                user.user_id,
+                user.balance,
+                user.username or f"user_{user.user_id}"
+            ))
             
             keyboard = [
                 [InlineKeyboardButton("🆕 THUÊ TIẾP", callback_data="menu_rent")],
@@ -1544,7 +1569,6 @@ async def rent_cancel_callback(update: Update, context: Context):
             db.session.rollback()
             logger.error(f"❌ LỖI: {e}")
             await query.edit_message_text(f"❌ **LỖI**\n\n{str(e)}")
-
 async def rent_list_callback(update: Update, context: Context):
     """Hiển thị danh sách số đang thuê - CÓ NÚT HỦY CHO SỐ CHỜ OTP"""
     query = update.callback_query

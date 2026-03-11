@@ -459,6 +459,25 @@ def setup_sepay_webhook(app):
                 try:
                     db.session.commit()
                     logger.info(f"✅ COMMIT THÀNH CÔNG! Balance: {target_user.balance}")
+                    
+                    # ===== PUSH LÊN RENDER NGAY =====
+                    try:
+                        RENDER_URL = os.getenv('RENDER_URL', 'https://bot-thue-sms-new.onrender.com')
+                        push_data = {
+                            'user_id': target_user.user_id,
+                            'balance': target_user.balance,
+                            'username': target_user.username or f"user_{target_user.user_id}"
+                        }
+                        # Gửi trong thread riêng để không block webhook
+                        threading.Thread(target=lambda: requests.post(
+                            f"{RENDER_URL}/api/sync-bidirectional",
+                            json=push_data,
+                            timeout=3
+                        )).start()
+                        logger.info(f"📤 Push balance sau nạp SePay: {target_user.balance}đ")
+                    except Exception as e:
+                        logger.error(f"❌ Lỗi push lên Render: {e}")
+                        
                 except Exception as e:
                     logger.error(f"❌ COMMIT LỖI: {e}")
                     db.session.rollback()
@@ -494,31 +513,6 @@ def setup_sepay_webhook(app):
                         
                 except Exception as e:
                     logger.error(f"❌ Lỗi gửi Telegram: {e}")
-                
-                # ===== ĐỒNG BỘ 2 CHIỀU =====
-                try:
-                    # Chuẩn bị dữ liệu user để đồng bộ
-                    user_data = {
-                        'user_id': target_user.user_id,
-                        'balance': target_user.balance,
-                        'username': target_user.username or f"user_{target_user.user_id}"
-                    }
-                    
-                    # Chuẩn bị dữ liệu giao dịch để đồng bộ xuống Local
-                    transaction_data = {
-                        'transaction_code': transaction.transaction_code,
-                        'user_id': target_user.user_id,
-                        'amount': amount,
-                        'type': 'deposit',
-                        'time': current_time.isoformat(),
-                        'description': f"NAP qua SePay: {content}"
-                    }
-                    
-                    # Đồng bộ 2 chiều
-                    sync_to_render(user_data)
-                    
-                except Exception as e:
-                    logger.error(f"❌ Lỗi đồng bộ: {e}")
                 
                 logger.info(f"📌 Giao dịch {transaction.transaction_code} hoàn tất")
 

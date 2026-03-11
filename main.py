@@ -202,7 +202,7 @@ user_cache = {}
 
 # ===== HÀM KIỂM TRA SỐ HẾT HẠN =====
 def check_expired_rentals():
-    """Kiểm tra và tự động hoàn tiền cho các số hết hạn"""
+    """Kiểm tra và tự động hoàn tiền cho các số hết hạn + PUSH LÊN RENDER"""
     with app.app_context():
         try:
             expired_rentals = Rental.query.filter(
@@ -230,11 +230,12 @@ def check_expired_rentals():
                             'balance': user.balance,
                             'username': user.username or f"user_{user.user_id}"
                         }
-                        requests.post(
+                        # Dùng thread để không block scheduler
+                        threading.Thread(target=lambda: requests.post(
                             f"{RENDER_URL}/api/sync-bidirectional",
                             json=push_data,
                             timeout=2
-                        )
+                        )).start()
                         logger.info(f"📤 Push sau hoàn: {user.balance}đ")
                     except Exception as e:
                         logger.error(f"❌ Lỗi push: {e}")
@@ -614,81 +615,14 @@ def api_sync_bidirectional():
         data = request.json
         logger.info(f"📥 Sync bidirectional request: {data}")
         
-        # ===== KIỂM TRA CẢ 2 TRƯỜNG HỢP =====
+        # ===== CHỈ XỬ LÝ TRƯỜNG HỢP ĐỒNG BỘ TRANSACTIONS =====
         local_transactions = data.get('local_transactions', [])
-        user_id = data.get('user_id')
-        balance = data.get('balance')
-        username = data.get('username')
+        
+        if not local_transactions:
+            logger.info(f"⏭️ Request không có transactions, bỏ qua")
+            return jsonify({"success": True, "skipped": True}), 200
         
         with app.app_context():
-            # === TRƯỜNG HỢP 1: UPDATE BALANCE TRỰC TIẾP ===
-            if user_id and balance is not None:
-                user = get_or_create_user(user_id, username)
-                old_balance = user.balance
-                
-                balance = int(balance)
-
-                # ===== FIX: CHỈ CẬP NHẬT KHI BALANCE CAO HƠN =====
-                if balance > old_balance:
-                    amount_diff = balance - old_balance
-                    user.balance = balance
-                    user.last_active = get_vn_time()
-
-                    if username:
-                        user.username = username
-
-                    db.session.commit()
-
-                    logger.info(
-                        f"💰 DIRECT UPDATE: User {user_id}: {old_balance}đ → {user.balance}đ (+{amount_diff})"
-                    )
-
-                    # CHỈ TẠO TRANSACTION NẾU SỐ TIỀN THAY ĐỔI
-                    if amount_diff != 0:
-                        import secrets
-                        millis = int(time.time() * 1000)
-                        random_suffix = secrets.token_hex(2).upper()
-                        trans_code = f"DIRECT_{millis}_{random_suffix}"
-
-                        # XÁC ĐỊNH LOẠI GIAO DỊCH
-                        trans_type = 'deposit' if amount_diff > 0 else 'deduct'
-                        abs_amount = abs(amount_diff)
-
-                        transaction = Transaction(
-                            user_id=user.id,
-                            amount=abs_amount,  # LUÔN DƯƠNG
-                            type=trans_type,    # 'deposit' hoặc 'deduct'
-                            status='success',
-                            transaction_code=trans_code,
-                            description=f"Direct balance update from API",
-                            created_at=get_vn_time()
-                        )
-                        db.session.add(transaction)
-                        db.session.commit()
-
-                        # LOG ĐÚNG DẤU
-                        if amount_diff > 0:
-                            logger.info(f"✅ Đã tạo transaction {trans_code}: +{abs_amount:,}đ")
-                        else:
-                            logger.info(f"✅ Đã tạo transaction {trans_code}: -{abs_amount:,}đ")
-
-                elif balance < old_balance:
-                    # Balance thấp hơn - BỎ QUA (daemon sẽ xử lý)
-                    logger.info(f"⏭️ Bỏ qua sync vì balance thấp hơn: {balance} < {old_balance}")
-                    
-                else:
-                    logger.info(f"⏭️ Bỏ qua sync vì balance không đổi: {balance} = {old_balance}")
-
-                return jsonify({
-                    "success": True,
-                    "direct_update": True,
-                    "user_id": user.user_id,
-                    "old_balance": old_balance,
-                    "new_balance": user.balance,
-                    "message": "Balance updated successfully"
-                }), 200
-            
-            # === TRƯỜNG HỢP 2: ĐỒNG BỘ TỪ LOCAL TRANSACTIONS ===
             render_pending = Transaction.query.filter_by(status='pending').all()
             render_codes = {t.transaction_code for t in render_pending}
             
@@ -733,8 +667,7 @@ def api_sync_bidirectional():
                 "success": True,
                 "synced_from_local": synced_from_local,
                 "sync_to_local": sync_to_local,
-                "render_pending_count": len(render_pending),
-                "direct_update": False
+                "render_pending_count": len(render_pending)
             }), 200
             
     except Exception as e:
