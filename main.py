@@ -603,22 +603,63 @@ def api_sync_bidirectional():
         username = data.get('username')
         
         with app.app_context():
-
             # === TRƯỜNG HỢP 1: UPDATE BALANCE TRỰC TIẾP ===
-            # ⚠ TẮT SYNC BALANCE - DAEMON SẼ XỬ LÝ
             if user_id and balance is not None:
+                user = get_or_create_user(user_id, username)
+                old_balance = user.balance
+                
+                balance = int(balance)
 
-                logger.warning(
-                    f"🚫 BLOCK BALANCE SYNC FROM MAIN: user={user_id}, balance={balance}"
-                )
+                # ===== FIX: KHÔNG GHI ĐÈ BALANCE KHI NHỎ HƠN =====
+                if balance != old_balance:
+                    amount_diff = balance - old_balance
+                    user.balance = balance
+                    user.last_active = get_vn_time()
+
+                    if username:
+                        user.username = username
+
+                    db.session.commit()
+
+                    logger.info(
+                        f"💰 DIRECT UPDATE: User {user_id}: {old_balance}đ → {user.balance}đ (+{amount_diff})"
+                    )
+
+                    # CHỈ TẠO TRANSACTION NẾU SỐ TIỀN THAY ĐỔI
+                    if amount_diff != 0:
+                        import secrets
+                        millis = int(time.time() * 1000)
+                        random_suffix = secrets.token_hex(2).upper()
+                        trans_code = f"DIRECT_{millis}_{random_suffix}"
+
+                        transaction = Transaction(
+                            user_id=user.id,
+                            amount=amount_diff,
+                            type='adjustment',
+                            status='success',
+                            transaction_code=trans_code,
+                            description=f"Direct balance update from API",
+                            created_at=get_vn_time()
+                        )
+                        db.session.add(transaction)
+                        db.session.commit()
+
+                        logger.info(f"✅ Đã tạo transaction {trans_code}: +{amount_diff:,}đ")
+
+                else:
+                    logger.info(
+                        f"⏭️ Bỏ qua sync vì balance Render nhỏ hơn hoặc bằng ({balance} ≤ {old_balance})"
+                    )
 
                 return jsonify({
                     "success": True,
-                    "direct_update": False,
-                    "message": "Balance sync disabled - handled by daemon"
+                    "direct_update": True,
+                    "user_id": user.user_id,
+                    "old_balance": old_balance,
+                    "new_balance": user.balance,
+                    "message": "Balance updated successfully"
                 }), 200
-
-
+            
             # === TRƯỜNG HỢP 2: ĐỒNG BỘ TỪ LOCAL TRANSACTIONS ===
             render_pending = Transaction.query.filter_by(status='pending').all()
             render_codes = {t.transaction_code for t in render_pending}
@@ -633,7 +674,6 @@ def api_sync_bidirectional():
                 existing = Transaction.query.filter_by(transaction_code=lt['code']).first()
                 if not existing:
                     user = get_or_create_user(lt['user_id'], lt.get('username'))
-                    
                     new_trans = Transaction(
                         user_id=user.id,
                         amount=lt['amount'],
@@ -643,16 +683,13 @@ def api_sync_bidirectional():
                         description=f"Bidirectional sync: {lt['code']}",
                         created_at=get_vn_time()
                     )
-
                     db.session.add(new_trans)
                     synced_from_local += 1
-
                     logger.info(f"✅ Đồng bộ từ local: {lt['code']}")
             
             for trans in render_pending:
                 if trans.transaction_code not in local_codes:
                     user = User.query.get(trans.user_id)
-
                     if user:
                         sync_to_local.append({
                             "code": trans.transaction_code,
@@ -674,7 +711,7 @@ def api_sync_bidirectional():
             
     except Exception as e:
         logger.error(f"❌ Lỗi sync bidirectional: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        return jsonify({"success": False, "error": str(e)}), 500 
 
 # ===== API 11: FORCE ĐỒNG BỘ USER =====
 @app.route('/api/force-sync-user', methods=['POST'])
