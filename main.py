@@ -600,6 +600,7 @@ def api_sync_bidirectional():
         # ===== KIỂM TRA CẢ 2 TRƯỜNG HỢP =====
         local_transactions = data.get('local_transactions', [])
         user_id = data.get('user_id')
+        
         balance = data.get('balance')
         username = data.get('username')
         
@@ -611,8 +612,9 @@ def api_sync_bidirectional():
                 
                 balance = int(balance)
 
-                # ===== FIX: KHÔNG GHI ĐÈ BALANCE KHI NHỎ HƠN =====
-                if balance != old_balance:
+                # ===== FIX: KHÔNG CHO LOCAL GHI ĐÈ BALANCE NHỎ HƠN =====
+                if balance > old_balance:
+
                     amount_diff = balance - old_balance
                     
                     # CHỈ CẬP NHẬT KHI CÓ THAY ĐỔI
@@ -625,7 +627,7 @@ def api_sync_bidirectional():
                     db.session.commit()
 
                     logger.info(
-                        f"💰 DIRECT UPDATE: User {user_id}: {old_balance}đ → {user.balance}đ ({amount_diff:+,}đ)"
+                        f"💰 DIRECT UPDATE: User {user_id}: {old_balance}đ → {user.balance}đ (+{amount_diff:,}đ)"
                     )
 
                     # TẠO TRANSACTION NẾU CÓ THAY ĐỔI
@@ -636,26 +638,29 @@ def api_sync_bidirectional():
                         trans_code = f"SYNC_{millis}_{random_suffix}"
 
                         # XÁC ĐỊNH LOẠI GIAO DỊCH
-                        trans_type = 'deposit' if amount_diff > 0 else 'deduct'
+                        trans_type = 'deposit'
                         abs_amount = abs(amount_diff)
 
                         transaction = Transaction(
                             user_id=user.id,
-                            amount=abs_amount,  # LUÔN DƯƠNG
-                            type=trans_type,    # 'deposit' hoặc 'deduct'
+                            amount=abs_amount,
+                            type=trans_type,
                             status='success',
                             transaction_code=trans_code,
-                            description=f"Balance sync from {'Render' if amount_diff > 0 else 'Local'}",
+                            description="Balance sync from Local",
                             created_at=get_vn_time()
                         )
                         db.session.add(transaction)
                         db.session.commit()
 
-                        # LOG ĐÚNG DẤU
-                        if amount_diff > 0:
-                            logger.info(f"✅ Đã tạo transaction {trans_code}: +{abs_amount:,}đ")
-                        else:
-                            logger.info(f"✅ Đã tạo transaction {trans_code}: -{abs_amount:,}đ")
+                        logger.info(f"✅ Đã tạo transaction {trans_code}: +{abs_amount:,}đ")
+
+                elif balance < old_balance:
+
+                    # ⚠ BLOCK overwrite balance nhỏ hơn
+                    logger.warning(
+                        f"🚫 BLOCK SYNC: Local balance {balance}đ nhỏ hơn Render {old_balance}đ"
+                    )
 
                 else:
                     logger.info(
@@ -668,8 +673,8 @@ def api_sync_bidirectional():
                     "user_id": user.user_id,
                     "old_balance": old_balance,
                     "new_balance": user.balance,
-                    "amount_diff": amount_diff if 'amount_diff' in locals() else 0,
-                    "message": "Balance updated successfully"
+                    "amount_diff": balance - old_balance if balance > old_balance else 0,
+                    "message": "Balance sync processed"
                 }), 200
             
             # === TRƯỜNG HỢP 2: ĐỒNG BỘ TỪ LOCAL TRANSACTIONS ===
