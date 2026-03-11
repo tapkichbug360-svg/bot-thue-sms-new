@@ -293,7 +293,7 @@ class UserSyncDaemon:
         except Exception as e:
             self.log(f"⚠️ Telegram lỗi: {e}", "WARNING")
     def push_user_to_render(self, user_id, balance, username, reason=""):
-        """Đẩy user lên Render - GIỮ NGUYÊN LOGIC CŨ"""
+        """Đẩy user lên Render - CÓ KÈM TRANSACTIONS"""
         try:
             # Kiểm tra balance đã đồng bộ chưa
             render_balance = self.get_render_balance(user_id)
@@ -301,14 +301,25 @@ class UserSyncDaemon:
                 self.log(f"⏭️ User {user_id}: Balance đã đồng bộ ({balance}đ), bỏ qua push", "INFO")
                 return True
             
+            # ===== LẤY CÁC TRANSACTION PENDING GẦN ĐÂY =====
+            pending_trans = self.get_pending_transactions_for_user(user_id, limit=5)
+            
+            # Tạo payload
+            payload = {
+                'user_id': user_id,
+                'balance': balance,
+                'username': username
+            }
+            
+            # Chỉ thêm local_transactions nếu có
+            if pending_trans:
+                payload['local_transactions'] = pending_trans
+                self.log(f"📦 Kèm {len(pending_trans)} transaction pending", "INFO")
+            
             # Push lên Render
             response = requests.post(
                 f"{RENDER_URL}/api/sync-bidirectional",
-                json={
-                    'user_id': user_id,
-                    'balance': balance,
-                    'username': username
-                },
+                json=payload,
                 timeout=self.push_timeout
             )
             
@@ -322,6 +333,53 @@ class UserSyncDaemon:
         except Exception as e:
             self.log(f"❌ Lỗi push user {user_id}: {e}", "ERROR")
             return False
+
+    def get_pending_transactions_for_user(self, user_id, limit=5):
+        """Lấy các transaction pending của user"""
+        try:
+            conn = self.get_db_connection()
+            cursor = conn.cursor()
+            
+            # Kiểm tra bảng deposit_transactions có tồn tại không
+            cursor.execute("""
+                SELECT name FROM sqlite_master 
+                WHERE type='table' AND name='deposit_transactions'
+            """)
+            if not cursor.fetchone():
+                conn.close()
+                return []
+            
+            cursor.execute("""
+                SELECT transaction_id, amount, user_id, status
+                FROM deposit_transactions 
+                WHERE user_id = ? AND status = 'pending'
+                ORDER BY created_at DESC
+                LIMIT ?
+            """, (user_id, limit))
+            pending = cursor.fetchall()
+            
+            result = []
+            for trans_id, amount, uid, status in pending:
+                # Lấy username
+                cursor2 = conn.cursor()
+                cursor2.execute('SELECT username FROM users WHERE user_id = ?', (uid,))
+                user = cursor2.fetchone()
+                username = user[0] if user else f"user_{uid}"
+                cursor2.close()
+                
+                result.append({
+                    'code': trans_id,
+                    'amount': amount,
+                    'user_id': uid,
+                    'username': username,
+                    'status': status
+                })
+            
+            conn.close()
+            return result
+        except Exception as e:
+            self.log(f"❌ Lỗi lấy pending transactions: {e}", "ERROR")
+            return []
     
     # ==================== ĐẨY DỮ LIỆU LÊN RENDER ====================
     def pull_user_from_render(self, user_id):
