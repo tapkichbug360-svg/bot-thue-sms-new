@@ -630,70 +630,119 @@ def api_reset_cache():
         return jsonify({"success": True, "message": "Cache reset"}), 200
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
-# ===== API 10: ĐỒNG BỘ 2 CHIỀU + UPDATE BALANCE TRỰC TIẾP =====
+# ===== API 10: ĐỒNG BỘ 2 CHIỀU =====
 @app.route('/api/sync-bidirectional', methods=['POST'])
 def api_sync_bidirectional():
     try:
         data = request.json
         logger.info(f"📥 Sync bidirectional request: {data}")
         
-        # ===== CHỈ XỬ LÝ TRƯỜNG HỢP ĐỒNG BỘ TRANSACTIONS =====
+        # ===== LẤY DỮ LIỆU TỪ REQUEST =====
         local_transactions = data.get('local_transactions', [])
-        
-        if not local_transactions:
-            logger.info(f"⏭️ Request không có transactions, bỏ qua")
-            return jsonify({"success": True, "skipped": True}), 200
+        user_id = data.get('user_id')
+        balance = data.get('balance')
+        username = data.get('username')
         
         with app.app_context():
+            # ===== BƯỚC 1: XỬ LÝ UPDATE BALANCE (NẾU CÓ) =====
+            user = None
+            balance_updated = False
+            
+            if user_id and balance is not None:
+                user = get_or_create_user(user_id, username)
+                old_balance = user.balance
+                
+                # CHỈ CẬP NHẬT KHI BALANCE MỚI CAO HƠN HOẶC KHÁC
+                if balance != old_balance:
+                    # Nếu balance mới cao hơn hoặc thấp hơn đều cập nhật
+                    # (Render là nguồn chính)
+                    user.balance = balance
+                    user.last_active = get_vn_time()
+                    
+                    if username:
+                        user.username = username
+                    
+                    db.session.flush()
+                    balance_updated = True
+                    
+                    diff = balance - old_balance
+                    if diff > 0:
+                        logger.info(f"💰 Cập nhật balance: +{diff}đ (User {user_id}: {old_balance} → {balance})")
+                    else:
+                        logger.info(f"💰 Cập nhật balance: {diff}đ (User {user_id}: {old_balance} → {balance})")
+            
+            # ===== BƯỚC 2: XỬ LÝ LOCAL TRANSACTIONS =====
+            synced_from_local = 0
             render_pending = Transaction.query.filter_by(status='pending').all()
             render_codes = {t.transaction_code for t in render_pending}
-            
             local_codes = set()
-            synced_from_local = 0
-            sync_to_local = []
             
             for lt in local_transactions:
                 local_codes.add(lt['code'])
                 
+                # Kiểm tra transaction đã tồn tại chưa
                 existing = Transaction.query.filter_by(transaction_code=lt['code']).first()
                 if not existing:
-                    user = get_or_create_user(lt['user_id'], lt.get('username'))
-                    new_trans = Transaction(
-                        user_id=user.id,
-                        amount=lt['amount'],
-                        type='deposit',
-                        status='pending',
-                        transaction_code=lt['code'],
-                        description=f"Bidirectional sync: {lt['code']}",
-                        created_at=get_vn_time()
-                    )
-                    db.session.add(new_trans)
-                    synced_from_local += 1
-                    logger.info(f"✅ Đồng bộ từ local: {lt['code']}")
+                    # Tìm user cho transaction này
+                    trans_user = None
+                    if user and user.user_id == lt['user_id']:
+                        trans_user = user
+                    else:
+                        trans_user = get_or_create_user(lt['user_id'], lt.get('username'))
+                    
+                    if trans_user:
+                        # Tạo transaction mới
+                        new_trans = Transaction(
+                            user_id=trans_user.id,
+                            amount=lt['amount'],
+                            type='deposit',
+                            status='pending',
+                            transaction_code=lt['code'],
+                            description=f"Bidirectional sync: {lt['code']}",
+                            created_at=get_vn_time()
+                        )
+                        db.session.add(new_trans)
+                        synced_from_local += 1
+                        logger.info(f"✅ Đồng bộ transaction từ local: {lt['code']} - {lt['amount']}đ")
             
+            # ===== BƯỚC 3: CHUẨN BỊ DỮ LIỆU ĐỂ GỬI VỀ LOCAL =====
+            sync_to_local = []
             for trans in render_pending:
                 if trans.transaction_code not in local_codes:
-                    user = User.query.get(trans.user_id)
-                    if user:
+                    trans_user = User.query.get(trans.user_id)
+                    if trans_user:
                         sync_to_local.append({
                             "code": trans.transaction_code,
                             "amount": trans.amount,
-                            "user_id": user.user_id,
+                            "user_id": trans_user.user_id,
+                            "username": trans_user.username,
                             "status": trans.status,
                             "created_at": trans.created_at.isoformat() if trans.created_at else None
                         })
             
+            # ===== BƯỚC 4: COMMIT TẤT CẢ =====
             db.session.commit()
             
-            return jsonify({
+            # ===== BƯỚC 5: TRẢ KẾT QUẢ =====
+            response_data = {
                 "success": True,
                 "synced_from_local": synced_from_local,
                 "sync_to_local": sync_to_local,
                 "render_pending_count": len(render_pending)
-            }), 200
+            }
+            
+            if balance_updated and user:
+                response_data["balance_updated"] = True
+                response_data["user_id"] = user.user_id
+                response_data["new_balance"] = user.balance
+            
+            logger.info(f"✅ Sync bidirectional hoàn tất: {synced_from_local} transactions từ local")
+            return jsonify(response_data), 200
             
     except Exception as e:
         logger.error(f"❌ Lỗi sync bidirectional: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
 # ===== API 11: FORCE ĐỒNG BỘ USER =====
 @app.route('/api/force-sync-user', methods=['POST'])
