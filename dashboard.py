@@ -1920,8 +1920,18 @@ def api_receive_sync():
             with app.app_context():
                 user = User.query.filter_by(user_id=user_id).first()
                 if user:
+
+                    # 🔴 KIỂM TRA TRÁNH CỘNG TRÙNG
+                    existing_tx = Transaction.query.filter_by(transaction_code=tx_code).first()
+                    if existing_tx:
+                        logger.info(f"⚠️ Transaction {tx_code} đã tồn tại, bỏ qua")
+                        return jsonify({'success': True})
+
                     old_balance = user.balance
-                    user.balance += amount
+
+                    # 🔴 CHỈ CỘNG KHI AMOUNT > 0
+                    if amount and amount > 0:
+                        user.balance += amount
                     
                     # Tạo transaction record
                     transaction = Transaction(
@@ -1933,6 +1943,7 @@ def api_receive_sync():
                         description=f"Đồng bộ từ SePay",
                         created_at=datetime.now()
                     )
+
                     db.session.add(transaction)
                     db.session.commit()
                     
