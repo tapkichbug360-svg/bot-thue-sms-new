@@ -346,68 +346,27 @@ class UserSyncDaemon:
                 if render_balance is None:
                     return False
                 
-                # ===== LOGIC THÔNG MINH =====
                 if render_balance > local_balance:
-                    diff = render_balance - local_balance
-                    
-                    # TRƯỜNG HỢP ĐẶC BIỆT: local=0, render có tiền
-                    if local_balance == 0 and diff > 0:
-                        # Kiểm tra xem có rental gần đây không
-                        last_rental_time = self.get_last_rental_time(user_id)
-                        if last_rental_time and (time.time() - last_rental_time) < 30:
-                            self.log(f"⏳ User {user_id} vừa thuê số {(time.time() - last_rental_time):.0f}s trước, chờ Render sync...", "INFO")
-                            return True
-                    
-                    # Cập nhật local từ Render
+                    # Render cao hơn (nạp tiền)
                     self.update_local_balance(user_id, render_balance)
-                    self.log(f"📥 Cập nhật local từ Render: {local_balance} → {render_balance} (+{diff})", "SUCCESS")
+                    diff = render_balance - local_balance
+                    self.send_telegram_notification(user_id, render_balance, diff, "NAP")
                     
-                    # Gửi thông báo nếu có diff
-                    if diff > 0:
-                        self.send_telegram_notification(user_id, render_balance, diff, "NAP")
-                        
                 elif render_balance < local_balance:
-                    # Local cao hơn (trừ tiền)
+                    # Local cao hơn (trừ tiền) - KIỂM TRA THÊM
                     time_since_sync = time.time() - self.last_sync.get(user_id, 0)
-                    diff = local_balance - render_balance
-                    
-                    if time_since_sync < 10:
+                    if time_since_sync < 10:  # Nếu mới sync trong 10 giây
                         self.log(f"⏳ User {user_id} vừa sync, chờ Render cập nhật", "INFO")
                         self.pending_sync.add(user_id)
                     else:
-                        self.log(f"📤 Đẩy local lên Render: {local_balance} > {render_balance} (diff={diff})", "INFO")
+                        self.log(f"⚠️ Local cao hơn Render: {local_balance} > {render_balance}", "WARNING")
                         self.push_user_to_render(user_id, local_balance, f"user_{user_id}", "sync_from_daemon")
                         self.last_sync[user_id] = time.time()
                     
-                else:
-                    self.log(f"✅ User {user_id}: Đã đồng bộ {local_balance}đ", "INFO")
-                
                 return True
         except Exception as e:
             self.log(f"❌ Lỗi: {e}", "ERROR")
             return False
-
-    def get_last_rental_time(self, user_id):
-        """Lấy thời gian thuê số gần nhất của user"""
-        try:
-            conn = self.get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT created_at FROM rentals 
-                WHERE user_id = ? 
-                ORDER BY created_at DESC LIMIT 1
-            """, (user_id,))
-            result = cursor.fetchone()
-            conn.close()
-            
-            if result and result[0]:
-                from datetime import datetime
-                dt = datetime.fromisoformat(result[0])
-                return dt.timestamp()
-            return 0
-        except Exception as e:
-            self.log(f"❌ Lỗi lấy rental: {e}", "ERROR")
-            return 0
         
     def push_user_batch(self, users):
         """Đẩy nhiều user song song - LỌC USER CÓ BALANCE > 0"""
