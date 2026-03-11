@@ -403,10 +403,32 @@ def setup_sepay_webhook(app):
                 logger.info(f"👤 USER: {target_user.user_id}, Username: {target_user.username}")
                 logger.info(f"💰 BALANCE HIỆN TẠI TRONG DB: {target_user.balance}")
                 
-                # ===== XỬ LÝ GIAO DỊCH - CỘNG DỒN, KHÔNG GHI ĐÈ =====
+                # ===== QUAN TRỌNG: LẤY BALANCE MỚI NHẤT TỪ RENDER =====
+                RENDER_URL = os.getenv('RENDER_URL', 'https://bot-thue-sms-new.onrender.com')
+                render_balance = None
+                try:
+                    response = requests.post(
+                        f"{RENDER_URL}/api/check-user",
+                        json={'user_id': target_user.user_id},
+                        timeout=3
+                    )
+                    if response.status_code == 200:
+                        data = response.json()
+                        render_balance = data.get('balance')
+                        logger.info(f"📤 Lấy balance từ Render: {render_balance}đ")
+                except Exception as e:
+                    logger.error(f"⚠️ Không lấy được balance từ Render: {e}")
+
+                # Cập nhật local nếu render cao hơn
+                if render_balance is not None and render_balance > target_user.balance:
+                    logger.info(f"⚠️ Render có balance cao hơn: {render_balance} > {target_user.balance}")
+                    target_user.balance = render_balance
+                    db.session.commit()
+                    logger.info(f"✅ Đã cập nhật local từ Render: {target_user.balance}đ")
+
                 old_balance = target_user.balance
 
-                # ===== QUAN TRỌNG: CỘNG DỒN SỐ DƯ =====
+                # ===== CỘNG DỒN =====
                 target_user.balance += amount
                 logger.info(f"💰 ĐÃ CỘNG DỒN {amount} VÀO BALANCE: {old_balance} → {target_user.balance}")
 
@@ -456,12 +478,22 @@ def setup_sepay_webhook(app):
                     
                     # ===== BƯỚC 2: PUSH LÊN RENDER VỚI RETRY =====
                     push_success = False
-                    RENDER_URL = os.getenv('RENDER_URL', 'https://bot-thue-sms-new.onrender.com')
                     push_data = {
                         'user_id': target_user.user_id,
                         'balance': target_user.balance,
-                        'username': target_user.username or f"user_{target_user.user_id}"
+                        'username': target_user.username or f"user_{target_user.user_id}",
+                        'local_transactions': [
+                            {
+                                'code': transaction.transaction_code,
+                                'amount': amount,
+                                'user_id': target_user.user_id,
+                                'username': target_user.username or f"user_{target_user.user_id}",
+                                'status': 'success'
+                            }
+                        ]
                     }
+                    
+                    logger.info(f"📤 Đang push lên Render với 1 transaction...")
                     
                     # Thử push 5 lần với exponential backoff
                     for attempt in range(5):
@@ -473,21 +505,37 @@ def setup_sepay_webhook(app):
                             )
                             
                             if response.status_code == 200:
-                                push_success = True
-                                logger.info(f"📤 Push lên Render thành công lần {attempt+1}")
-                                break
+                                data = response.json()
+                                if data.get('skipped'):
+                                    logger.warning(f"⚠️ Push lần {attempt+1} bị skipped")
+                                else:
+                                    push_success = True
+                                    logger.info(f"📤 Push lên Render thành công lần {attempt+1}")
+                                    logger.info(f"   Synced: {data.get('synced_from_local', 0)} transactions")
+                                    break
                             else:
                                 logger.warning(f"⚠️ Push lần {attempt+1} thất bại: {response.status_code}")
                                 if attempt < 4:
                                     time.sleep(2 ** attempt)
                                     
+                        except requests.exceptions.Timeout:
+                            logger.error(f"⏰ Timeout lần {attempt+1}")
+                            if attempt < 4:
+                                time.sleep(2 ** attempt)
                         except Exception as e:
                             logger.error(f"❌ Lỗi push lần {attempt+1}: {e}")
                             if attempt < 4:
                                 time.sleep(2 ** attempt)
                     
                     if not push_success:
-                        save_failed_push_sepay(target_user.user_id, target_user.balance, target_user.username)
+                        # Lưu vào file để retry sau
+                        save_failed_push_sepay(
+                            target_user.user_id, 
+                            target_user.balance, 
+                            target_user.username,
+                            transaction.transaction_code,
+                            amount
+                        )
                         logger.error(f"❌ Push thất bại sau 5 lần - Đã lưu để retry")
                         
                 except Exception as e:
@@ -546,7 +594,7 @@ def setup_sepay_webhook(app):
             return jsonify({"success": False}), 500
 
     # ===== HÀM LƯU PUSH THẤT BẠI CHO SEPAY =====
-    def save_failed_push_sepay(user_id, balance, username):
+    def save_failed_push_sepay(user_id, balance, username, transaction_code, amount):
         """Lưu push thất bại từ SePay"""
         try:
             failed_file = 'failed_pushes_sepay.json'
@@ -559,40 +607,12 @@ def setup_sepay_webhook(app):
                 'user_id': user_id,
                 'balance': balance,
                 'username': username,
+                'transaction_code': transaction_code,
+                'amount': amount,
                 'time': datetime.now().isoformat(),
                 'source': 'sepay'
             })
             
-            if len(failed) > 50:
-                failed = failed[-50:]
-            
-            with open(failed_file, 'w') as f:
-                json.dump(failed, f, indent=2)
-            
-            logger.info(f"💾 Đã lưu push thất bại SePay của user {user_id}")
-            
-        except Exception as e:
-            logger.error(f"❌ Lỗi lưu failed push SePay: {e}")
-
-    # ===== HÀM LƯU PUSH THẤT BẠI CHO SEPAY =====
-    def save_failed_push_sepay(user_id, balance, username):
-        """Lưu push thất bại từ SePay"""
-        try:
-            failed_file = 'failed_pushes_sepay.json'
-            failed = []
-            if os.path.exists(failed_file):
-                with open(failed_file, 'r') as f:
-                    failed = json.load(f)
-            
-            failed.append({
-                'user_id': user_id,
-                'balance': balance,
-                'username': username,
-                'time': datetime.now().isoformat(),
-                'source': 'sepay'
-            })
-            
-            # Giữ 50 entry gần nhất
             if len(failed) > 50:
                 failed = failed[-50:]
             

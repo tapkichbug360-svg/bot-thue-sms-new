@@ -12,10 +12,10 @@ import csv
 import asyncio
 import time
 import threading
-def save_failed_push(user_id, balance, username):
+def save_failed_push(user_id, balance, username, transaction_code, amount):
     """Lưu push thất bại để xử lý sau"""
     try:
-        failed_file = 'failed_pushes.json'
+        failed_file = 'failed_pushes_dashboard.json'
         failed = []
         if os.path.exists(failed_file):
             with open(failed_file, 'r') as f:
@@ -25,20 +25,23 @@ def save_failed_push(user_id, balance, username):
             'user_id': user_id,
             'balance': balance,
             'username': username,
-            'time': datetime.now().isoformat()
+            'transaction_code': transaction_code,
+            'amount': amount,
+            'time': datetime.now().isoformat(),
+            'source': 'dashboard'
         })
         
-        # Giữ 100 entry gần nhất
-        if len(failed) > 100:
-            failed = failed[-100:]
+        # Giữ 50 entry gần nhất
+        if len(failed) > 50:
+            failed = failed[-50:]
         
         with open(failed_file, 'w') as f:
             json.dump(failed, f, indent=2)
         
-        logger.info(f"💾 Đã lưu push thất bại của user {user_id}")
+        logger.info(f"💾 Đã lưu push thất bại Dashboard của user {user_id}")
         
     except Exception as e:
-        logger.error(f"❌ Lỗi lưu failed push: {e}")
+        logger.error(f"❌ Lỗi lưu failed push Dashboard: {e}")
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
@@ -1991,6 +1994,11 @@ def add_money():
     amount = request.form.get('amount', type=int)
     reason = request.form.get('reason', 'Cộng tiền thủ công')
     
+    print(f"\n🔍 DEBUG - Cộng tiền thủ công:")
+    print(f"  User ID: {user_id}")
+    print(f"  Amount: {amount}đ")
+    print(f"  Reason: {reason}")
+    
     if not user_id or not amount or amount < 1000:
         return jsonify({'success': False, 'error': 'Thông tin không hợp lệ'})
     
@@ -2022,14 +2030,25 @@ def add_money():
         
         logger.info(f"✅ LOCAL UPDATE: User {user_id}: {old_balance}đ → {new_balance}đ")
         
-        # ===== BƯỚC 2: PUSH LÊN RENDER VỚI RETRY =====
-        push_success = False
+        # ===== BƯỚC 2: PUSH LÊN RENDER VỚI TRANSACTIONS =====
         RENDER_URL = "https://bot-thue-sms-new.onrender.com"
         push_data = {
             'user_id': user.user_id,
             'balance': user.balance,
-            'username': user.username or f"user_{user.user_id}"
+            'username': user.username or f"user_{user.user_id}",
+            'local_transactions': [
+                {
+                    'code': transaction_code,
+                    'amount': amount,
+                    'user_id': user.user_id,
+                    'username': user.username or f"user_{user.user_id}",
+                    'status': 'success'
+                }
+            ]
         }
+        
+        push_success = False
+        logger.info(f"📤 Đang push lên Render với {len(push_data['local_transactions'])} transaction...")
         
         # Thử push 5 lần với exponential backoff
         for attempt in range(5):
@@ -2041,14 +2060,23 @@ def add_money():
                 )
                 
                 if response.status_code == 200:
-                    push_success = True
-                    logger.info(f"📤 Push lên Render thành công lần {attempt+1}")
-                    break
+                    data = response.json()
+                    if data.get('skipped'):
+                        logger.warning(f"⚠️ Push lần {attempt+1} bị skipped")
+                    else:
+                        push_success = True
+                        logger.info(f"📤 Push lên Render thành công lần {attempt+1}")
+                        logger.info(f"   Synced: {data.get('synced_from_local', 0)} transactions")
+                        break
                 else:
                     logger.warning(f"⚠️ Push lần {attempt+1} thất bại: {response.status_code}")
                     if attempt < 4:
                         time.sleep(2 ** attempt)  # 1,2,4,8 giây
                         
+            except requests.exceptions.Timeout:
+                logger.error(f"⏰ Timeout lần {attempt+1}")
+                if attempt < 4:
+                    time.sleep(2 ** attempt)
             except Exception as e:
                 logger.error(f"❌ Lỗi push lần {attempt+1}: {e}")
                 if attempt < 4:
@@ -2056,7 +2084,7 @@ def add_money():
         
         if not push_success:
             # Lưu vào file để retry sau
-            save_failed_push(user.user_id, user.balance, user.username)
+            save_failed_push(user.user_id, user.balance, user.username, transaction_code, amount)
             logger.error(f"❌ Push thất bại sau 5 lần - Đã lưu để retry")
         
         # Gửi Telegram
@@ -2112,14 +2140,25 @@ def deduct_money():
         
         logger.info(f"✅ LOCAL UPDATE: User {user_id}: {old_balance}đ → {new_balance}đ")
         
-        # ===== BƯỚC 2: PUSH LÊN RENDER VỚI RETRY =====
-        push_success = False
+        # ===== BƯỚC 2: PUSH LÊN RENDER VỚI TRANSACTIONS =====
         RENDER_URL = "https://bot-thue-sms-new.onrender.com"
         push_data = {
             'user_id': user.user_id,
             'balance': user.balance,
-            'username': user.username or f"user_{user.user_id}"
+            'username': user.username or f"user_{user.user_id}",
+            'local_transactions': [
+                {
+                    'code': transaction_code,
+                    'amount': amount,
+                    'user_id': user.user_id,
+                    'username': user.username or f"user_{user.user_id}",
+                    'status': 'success'
+                }
+            ]
         }
+        
+        push_success = False
+        logger.info(f"📤 Đang push lên Render với {len(push_data['local_transactions'])} transaction...")
         
         # Thử push 5 lần với exponential backoff
         for attempt in range(5):
@@ -2131,14 +2170,23 @@ def deduct_money():
                 )
                 
                 if response.status_code == 200:
-                    push_success = True
-                    logger.info(f"📤 Push lên Render thành công lần {attempt+1}")
-                    break
+                    data = response.json()
+                    if data.get('skipped'):
+                        logger.warning(f"⚠️ Push lần {attempt+1} bị skipped")
+                    else:
+                        push_success = True
+                        logger.info(f"📤 Push lên Render thành công lần {attempt+1}")
+                        logger.info(f"   Synced: {data.get('synced_from_local', 0)} transactions")
+                        break
                 else:
                     logger.warning(f"⚠️ Push lần {attempt+1} thất bại: {response.status_code}")
                     if attempt < 4:
                         time.sleep(2 ** attempt)
                         
+            except requests.exceptions.Timeout:
+                logger.error(f"⏰ Timeout lần {attempt+1}")
+                if attempt < 4:
+                    time.sleep(2 ** attempt)
             except Exception as e:
                 logger.error(f"❌ Lỗi push lần {attempt+1}: {e}")
                 if attempt < 4:
@@ -2146,7 +2194,7 @@ def deduct_money():
         
         if not push_success:
             # Lưu vào file để retry sau
-            save_failed_push(user.user_id, user.balance, user.username)
+            save_failed_push(user.user_id, user.balance, user.username, transaction_code, amount)
             logger.error(f"❌ Push thất bại sau 5 lần - Đã lưu để retry")
         
         # Gửi Telegram
