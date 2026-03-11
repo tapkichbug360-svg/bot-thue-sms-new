@@ -455,12 +455,12 @@ def setup_sepay_webhook(app):
                 # Cập nhật thời gian
                 target_user.last_active = current_time
 
-                # COMMIT
+                # ===== BƯỚC 1: CẬP NHẬT LOCAL =====
                 try:
                     db.session.commit()
-                    logger.info(f"✅ COMMIT THÀNH CÔNG! Balance: {target_user.balance}")
+                    logger.info(f"✅ LOCAL UPDATE: User {target_user.user_id}: {old_balance}đ → {target_user.balance}đ")
                     
-                    # ===== PUSH LÊN RENDER NGAY =====
+                    # ===== BƯỚC 2: PUSH LÊN RENDER (KHÔNG CHỜ) =====
                     try:
                         RENDER_URL = os.getenv('RENDER_URL', 'https://bot-thue-sms-new.onrender.com')
                         push_data = {
@@ -474,7 +474,7 @@ def setup_sepay_webhook(app):
                             json=push_data,
                             timeout=3
                         )).start()
-                        logger.info(f"📤 Push balance sau nạp SePay: {target_user.balance}đ")
+                        logger.info(f"📤 Push lên Render: {target_user.balance}đ")
                     except Exception as e:
                         logger.error(f"❌ Lỗi push lên Render: {e}")
                         

@@ -202,7 +202,7 @@ user_cache = {}
 
 # ===== HÀM KIỂM TRA SỐ HẾT HẠN =====
 def check_expired_rentals():
-    """Kiểm tra và tự động hoàn tiền cho các số hết hạn + PUSH LÊN RENDER"""
+    """Kiểm tra và tự động hoàn tiền cho các số hết hạn + GỬI TELEGRAM"""
     with app.app_context():
         try:
             expired_rentals = Rental.query.filter(
@@ -215,14 +215,16 @@ def check_expired_rentals():
                 if user:
                     refund = rental.price_charged
                     old_balance = user.balance
+                    
+                    # ===== BƯỚC 1: CẬP NHẬT LOCAL NGAY =====
                     user.balance += refund
                     rental.status = 'expired'
                     rental.updated_at = get_vn_time()
                     db.session.commit()
 
-                    logger.info(f"💰 TỰ ĐỘNG HOÀN {refund}đ CHO USER {user.user_id}")
+                    logger.info(f"✅ LOCAL UPDATE: User {user.user_id}: {old_balance}đ → {user.balance}đ (+{refund}đ)")
                     
-                    # ===== PUSH LÊN RENDER NGAY =====
+                    # ===== BƯỚC 2: PUSH LÊN RENDER (KHÔNG CHỜ) =====
                     try:
                         RENDER_URL = os.getenv('RENDER_URL', 'https://bot-thue-sms-new.onrender.com')
                         push_data = {
@@ -230,32 +232,52 @@ def check_expired_rentals():
                             'balance': user.balance,
                             'username': user.username or f"user_{user.user_id}"
                         }
-                        # Dùng thread để không block scheduler
                         threading.Thread(target=lambda: requests.post(
                             f"{RENDER_URL}/api/sync-bidirectional",
                             json=push_data,
                             timeout=2
                         )).start()
-                        logger.info(f"📤 Push sau hoàn: {user.balance}đ")
+                        logger.info(f"📤 Push lên Render: {user.balance}đ")
                     except Exception as e:
                         logger.error(f"❌ Lỗi push: {e}")
                     
-                    # Gửi Telegram
+                    # ===== BƯỚC 3: GỬI TELEGRAM THÔNG BÁO =====
                     if BOT_TOKEN:
                         try:
+                            # Tạo bot và gửi message
                             bot = Bot(token=BOT_TOKEN)
                             message = (
-                                f"⏰ **SỐ HẾT HẠN & HOÀN TIỀN**\n\n"
-                                f"• **Số:** `{rental.phone_number}`\n"
+                                f"⏰ **SỐ ĐÃ HẾT HẠN & HOÀN TIỀN**\n\n"
+                                f"• **Số điện thoại:** `{rental.phone_number}`\n"
                                 f"• **Dịch vụ:** {rental.service_name}\n"
-                                f"• **Tiền hoàn:** `{refund:,}đ`\n"
-                                f"• **Số dư mới:** `{user.balance:,}đ`"
+                                f"• **Số tiền hoàn:** `{refund:,}đ`\n"
+                                f"• **Số dư mới:** `{user.balance:,}đ`\n"
+                                f"• **Thời gian:** `{get_vn_time().strftime('%H:%M:%S %d/%m/%Y')}`\n\n"
+                                f"💡 *Số đã hết thời gian chờ OTP*"
                             )
+                            
+                            # Gửi message bất đồng bộ
                             asyncio.run(send_telegram_message(user.user_id, message))
+                            logger.info(f"📨 Đã gửi Telegram thông báo hoàn tiền cho user {user.user_id}")
                         except Exception as e:
-                            logger.error(f"Lỗi gửi Telegram: {e}")
+                            logger.error(f"❌ Lỗi gửi Telegram: {e}")
         except Exception as e:
             logger.error(f"Lỗi kiểm tra số hết hạn: {e}")
+
+
+async def send_telegram_message(chat_id, message):
+    """Gửi tin nhắn Telegram"""
+    if not BOT_TOKEN:
+        return
+    try:
+        bot = Bot(token=BOT_TOKEN)
+        await bot.send_message(
+            chat_id=chat_id, 
+            text=message, 
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        logger.error(f"Lỗi gửi Telegram: {e}")
 
 # ===== HÀM GET_OR_CREATE_USER =====
 def get_or_create_user(user_id, username=None):

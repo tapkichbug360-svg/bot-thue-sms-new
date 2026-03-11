@@ -531,7 +531,7 @@ async def rent_network_callback(update: Update, context: Context):
     )
 
 async def rent_confirm_callback(update: Update, context: Context):
-    """Xác nhận thuê số - Gọi API lấy số (ĐÃ FIX LỖI CỘNG TRỪ KHI THUÊ LIÊN TỤC) + PUSH LÊN RENDER"""
+    """Xác nhận thuê số - LOCAL TRƯỚC, RENDER SAU"""
     query = update.callback_query
     await safe_answer_callback(query, "⏳ Đang xử lý...")
     
@@ -545,7 +545,6 @@ async def rent_confirm_callback(update: Update, context: Context):
         await safe_edit_message(query, "❌ **LỖI DỮ LIỆU**\n\nVui lòng chọn lại.")
         return
     
-    # ===== KIỂM TRA API KEY =====
     if not API_KEY or not BASE_URL:
         await safe_edit_message(query, "❌ **LỖI CẤU HÌNH**\n\nVui lòng liên hệ admin.")
         return
@@ -553,222 +552,152 @@ async def rent_confirm_callback(update: Update, context: Context):
     user = update.effective_user
     
     with app.app_context():
-        # ===== LẤY USER MỚI NHẤT VỚI KHÓA =====
         db_user = User.query.filter_by(user_id=user.id).with_for_update().first()
         
-        logger.info(f"🔍 [BẮT ĐẦU] User {user.id} - Số dư từ DB: {db_user.balance if db_user else 0}đ")
-        
         if not db_user:
-            await safe_edit_message(query, "❌ **KHÔNG TÌM THẤY TÀI KHOẢN**\n\nVui lòng gửi /start để đăng ký.")
+            await safe_edit_message(query, "❌ **KHÔNG TÌM THẤY TÀI KHOẢN**\n\nVui lòng gửi /start.")
             return
         
-        # ===== KIỂM TRA GIAO DỊCH GẦN ĐÂY (CHỐNG SPAM) =====
-        recent_transactions = Rental.query.filter(
-            Rental.user_id == user.id,
-            Rental.created_at > datetime.now() - timedelta(seconds=10)
-        ).count()
-        
-        if recent_transactions > 3:
-            logger.warning(f"⚠️ User {user.id} đang thuê quá nhanh: {recent_transactions} lần/10s")
-            await safe_edit_message(query,
-                "⚠️ **BẠN ĐANG THUÊ QUÁ NHANH**\n\nVui lòng chờ 10 giây giữa các lần thuê."
-            )
-            return
-        
-        # ===== LỚP BẢO VỆ 1: KIỂM TRA SỐ DƯ LẦN 1 =====
         if db_user.balance < final_price:
             shortage = final_price - db_user.balance
             keyboard = [
                 [InlineKeyboardButton("💳 NẠP TIỀN NGAY", callback_data="menu_deposit")],
                 [InlineKeyboardButton("🔙 QUAY LẠI", callback_data="menu_rent")]
             ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
             await safe_edit_message(query,
-                f"❌ **SỐ DƯ KHÔNG ĐỦ!**\n\n"
-                f"• **Cần:** {final_price:,}đ\n"
-                f"• **Có:** {db_user.balance:,}đ\n"
-                f"• **Thiếu:** {shortage:,}đ\n\n"
-                f"Vui lòng nạp thêm tiền để tiếp tục.",
-                reply_markup
-            )
+                f"❌ **SỐ DƯ KHÔNG ĐỦ!**\n\nCần: {final_price:,}đ | Có: {db_user.balance:,}đ | Thiếu: {shortage:,}đ",
+                reply_markup=InlineKeyboardMarkup(keyboard))
             return
-        
-        await safe_delete_message(query.message)
-        
-        loading_msg = await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="⏳ **ĐANG XỬ LÝ YÊU CẦU...**\n\n🤖 Vui lòng chờ trong giây lát.",
-            parse_mode='Markdown'
-        )
-        
-        try:
-            # ===== GỌI API LẤY SỐ =====
-            url = f"{BASE_URL}/sim/get_sim"
-            params = {
-                'api_key': API_KEY,
-                'service_id': service_id
-            }
-            if network_id and network_id != 'None':
-                params['network_id'] = network_id
-            
-            logger.info(f"📞 Gọi API lấy số: service_id={service_id}, network_id={network_id}")
-            
-            timeout = aiohttp.ClientTimeout(total=15)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(url, params=params) as response:
-                    
-                    if response.status == 401:
-                        logger.error("🔴 API_KEY hết hạn")
-                        await loading_msg.edit_text("❌ **LỖI XÁC THỰC API**\n\nVui lòng liên hệ admin.")
-                        return
-                    
-                    try:
-                        response_data = await response.json()
-                    except:
-                        logger.error("API trả dữ liệu không hợp lệ")
-                        await loading_msg.edit_text("❌ **LỖI MÁY CHỦ API**")
-                        return
 
-            logger.info(f"API response: {response_data}")
+    await safe_delete_message(query.message)
+    
+    loading_msg = await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="⏳ **ĐANG XỬ LÝ YÊU CẦU...**\n\n🤖 Vui lòng chờ trong giây lát.",
+        parse_mode='Markdown'
+    )
+    
+    try:
+        url = f"{BASE_URL}/sim/get_sim"
+        params = {'api_key': API_KEY, 'service_id': service_id}
+        if network_id and network_id != 'None':
+            params['network_id'] = network_id
+        
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, params=params) as response:
+                if response.status == 401:
+                    await loading_msg.edit_text("❌ **LỖI XÁC THỰC API**\n\nVui lòng liên hệ admin.")
+                    return
+                response_data = await response.json()
+
+        if response_data.get('status') == 200:
+            sim_data = response_data.get('data', {})
+            phone = sim_data.get('phone')
+            otp_id = sim_data.get('otpId')
+            sim_id = sim_data.get('simId')
+            actual_price = sim_data.get('payment', final_price - 1000)
             
-            if response_data.get('status') == 200:
-                sim_data = response_data.get('data', {})
-                phone = sim_data.get('phone')
-                otp_id = sim_data.get('otpId')
-                sim_id = sim_data.get('simId')
-                actual_price = sim_data.get('payment', final_price - 1000)
-                
-                # Tìm rental đang active với số điện thoại này
-                existing_rental = Rental.query.filter(
+            with app.app_context():
+                existing = Rental.query.filter(
                     Rental.phone_number == phone,
                     Rental.status.in_(['waiting', 'completed'])
                 ).first()
-                
-                if existing_rental:
-                    logger.error(f"⚠️ Số {phone} đã được thuê bởi user {existing_rental.user_id}")
-                    await loading_msg.edit_text(
-                        "❌ **LỖI HỆ THỐNG**\n\nSố này đã được cấp cho người khác.\nVui lòng thử lại sau.",
-                        parse_mode='Markdown'
-                    )
+                if existing:
+                    await loading_msg.edit_text("❌ **SỐ NÀY ĐÃ ĐƯỢC CẤP**\n\nVui lòng thử lại sau.")
                     return
+
+                db_user = User.query.filter_by(user_id=user.id).with_for_update().first()
                 
-                try:
-                    db.session.refresh(db_user)
-                    db.session.expire_all()
-                    db.session.refresh(db_user)
-                    
-                    if db_user.balance < final_price:
-                        await loading_msg.edit_text(
-                            "❌ **LỖI HỆ THỐNG**\n\nSố dư không đủ, vui lòng thử lại.",
-                            parse_mode='Markdown'
-                        )
-                        return
-                    
-                    old_balance = db_user.balance
-                    
-                    rent_info = context.user_data.get('rent', {})
-                    if not rent_info:
-                        await loading_msg.edit_text(
-                            "❌ **LỖI SESSION**\n\nVui lòng chọn lại từ đầu.",
-                            reply_markup=InlineKeyboardMarkup([[
-                                InlineKeyboardButton("📱 CHỌN LẠI", callback_data="menu_rent")
-                            ]])
-                        )
-                        return
-                    
-                    rental = Rental(
-                        user_id=user.id,
-                        service_id=int(service_id),
-                        service_name=rent_info['service_name'],
-                        phone_number=phone,
-                        otp_id=otp_id,
-                        sim_id=sim_id,
-                        cost=actual_price,
-                        price_charged=final_price,
-                        status='waiting',
-                        created_at=datetime.now(),
-                        expires_at=datetime.now() + timedelta(minutes=5)
-                    )
-                    db.session.add(rental)
-                    
-                    db_user.balance -= final_price
-                    db_user.total_spent += final_price
-                    db_user.total_rentals += 1
-                    db_user.updated_at = datetime.now()
-                                        
-                    db.session.commit()
-                    db.session.refresh(db_user)
-                    
-                    # ===== PUSH LÊN RENDER BẰNG ASYNC - KHÔNG DÍNH VẠCH VÀNG =====
-                    asyncio.create_task(push_balance_async(
-                        user.id, 
-                        db_user.balance, 
-                        user.username or f"user_{user.id}"
-                    ))
-                    
-                    if 'rent' in context.user_data:
-                        del context.user_data['rent']
-                    
-                    keyboard = [
-                        [InlineKeyboardButton(f"📞 {phone} - {rent_info['service_name']}", callback_data=f"rent_view_{rental.id}")],
-                        [InlineKeyboardButton("📋 DANH SÁCH SỐ", callback_data="menu_rent_list")],
-                        [InlineKeyboardButton("🆕 THUÊ SỐ KHÁC", callback_data="menu_rent")],
-                        [InlineKeyboardButton("🔙 MENU CHÍNH", callback_data="menu_main")]
-                    ]
-                    
-                    await loading_msg.edit_text(
-                        f"✅ **THUÊ SỐ THÀNH CÔNG!**\n\n"
-                        f"📞 **Số:** `{phone}`\n"
-                        f"📱 **Dịch vụ:** {rent_info['service_name']}\n"
-                        f"💰 **Đã thanh toán:** {final_price:,}đ\n"
-                        f"💵 **Số dư còn lại:** {db_user.balance:,}đ",
-                        reply_markup=InlineKeyboardMarkup(keyboard),
-                        parse_mode='Markdown'
-                    )
-                    
-                    task = asyncio.create_task(
-                        auto_check_otp_task(
-                            context.bot,
-                            chat_id=update.effective_chat.id,
-                            otp_id=otp_id,
-                            rental_id=rental.id,
-                            user_id=user.id,
-                            service_name=rent_info['service_name'],
-                            phone=phone
-                        )
-                    )
-                    
-                    auto_check_tasks[rental.id] = task
-                    
-                except Exception as e:
-                    db.session.rollback()
-                    logger.error(f"❌ Lỗi database: {e}")
-                    await loading_msg.edit_text(
-                        "❌ **LỖI HỆ THỐNG**\n\nKhông thể lưu giao dịch.",
-                        parse_mode='Markdown'
-                    )
-            
-            else:
-                error_msg = response_data.get('message', 'Không rõ lỗi')
+                if db_user.balance < final_price:
+                    await loading_msg.edit_text("❌ **SỐ DƯ KHÔNG ĐỦ**\n\nSố dư đã thay đổi, vui lòng thử lại.")
+                    return
+
+                rent_info = context.user_data.get('rent', {})
+                if not rent_info:
+                    await loading_msg.edit_text("❌ **LỖI SESSION**\n\nChọn lại từ đầu.")
+                    return
+
+                rental = Rental(
+                    user_id=user.id,
+                    service_id=int(service_id),
+                    service_name=rent_info['service_name'],
+                    phone_number=phone,
+                    otp_id=otp_id,
+                    sim_id=sim_id,
+                    cost=actual_price,
+                    price_charged=final_price,
+                    status='waiting',
+                    created_at=datetime.now(),
+                    expires_at=datetime.now() + timedelta(minutes=5)
+                )
+                db.session.add(rental)
                 
+                old_balance = db_user.balance
+                db_user.balance -= final_price
+                db_user.total_spent += final_price
+                db_user.total_rentals += 1
+                db_user.updated_at = datetime.now()
+                
+                # ===== BƯỚC 1: CẬP NHẬT LOCAL NGAY =====
+                db.session.commit()
+                db.session.refresh(db_user)
+                
+                logger.info(f"✅ LOCAL UPDATE: User {user.id}: {old_balance}đ → {db_user.balance}đ")
+                
+                # ===== BƯỚC 2: PUSH LÊN RENDER (KHÔNG CHỜ) =====
+                asyncio.create_task(push_balance_async(
+                    user.id, 
+                    db_user.balance, 
+                    user.username or f"user_{user.id}"
+                ))
+                
+                if 'rent' in context.user_data:
+                    del context.user_data['rent']
+
+                keyboard = [
+                    [InlineKeyboardButton(f"📞 {phone} - {rent_info['service_name']}", callback_data=f"rent_view_{rental.id}")],
+                    [InlineKeyboardButton("📋 DANH SÁCH SỐ", callback_data="menu_rent_list")],
+                    [InlineKeyboardButton("🆕 THUÊ SỐ KHÁC", callback_data="menu_rent")],
+                    [InlineKeyboardButton("🔙 MENU CHÍNH", callback_data="menu_main")]
+                ]
+
                 await loading_msg.edit_text(
-                    f"❌ **LỖI TỪ MÁY CHỦ**\n\n📢 {error_msg}",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 QUAY LẠI", callback_data="menu_rent")]]),
+                    f"✅ **THUÊ SỐ THÀNH CÔNG!**\n\n"
+                    f"📞 **Số:** `{phone}`\n"
+                    f"📱 **Dịch vụ:** {rent_info['service_name']}\n"
+                    f"💰 **Đã thanh toán:** {final_price:,}đ\n"
+                    f"💵 **Số dư còn lại:** {db_user.balance:,}đ",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
                     parse_mode='Markdown'
                 )
-        
-        except asyncio.TimeoutError:
+
+                task = asyncio.create_task(
+                    auto_check_otp_task(
+                        context.bot,
+                        update.effective_chat.id,
+                        otp_id,
+                        rental.id,
+                        user.id,
+                        rent_info['service_name'],
+                        phone
+                    )
+                )
+                auto_check_tasks[rental.id] = task
+
+        else:
+            error_msg = response_data.get('message', 'Không rõ lỗi')
             await loading_msg.edit_text(
-                "⏰ **TIMEOUT - MÁY CHỦ KHÔNG PHẢN HỒI**\n\nVui lòng thử lại sau.",
+                f"❌ **LỖI TỪ SERVER**\n\n{error_msg}",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 QUAY LẠI", callback_data="menu_rent")]]),
                 parse_mode='Markdown'
             )
-        
-        except Exception as e:
-            logger.error(f"❌ Lỗi thuê số: {e}")
-            await loading_msg.edit_text(
-                "❌ **LỖI KẾT NỐI**\n\nVui lòng thử lại sau.",
-                parse_mode='Markdown'
-            )
+
+    except asyncio.TimeoutError:
+        await loading_msg.edit_text("⏰ **TIMEOUT API**\n\nThử lại sau.")
+    except Exception as e:
+        logger.error(f"❌ Lỗi thuê số: {e}")
+        await loading_msg.edit_text("❌ **LỖI KẾT NỐI**\n\nThử lại sau.")
 
 async def rent_check_callback(update: Update, context: Context):
     """Kiểm tra OTP thủ công - GỬI CẢ TEXT VÀ AUDIO"""
@@ -1432,7 +1361,7 @@ async def rent_reuse_callback(update: Update, context: Context):
                 parse_mode='Markdown'
             )
 async def rent_cancel_callback(update: Update, context: Context):
-    """Hủy số - SIÊU BẢO VỆ CHỐNG CỘNG SAI (ĐÃ CẬP NHẬT) + PUSH LÊN RENDER"""
+    """Hủy số - LOCAL TRƯỚC, RENDER SAU"""
     query = update.callback_query
     await safe_answer_callback(query)
     
@@ -1445,7 +1374,6 @@ async def rent_cancel_callback(update: Update, context: Context):
         await query.edit_message_text("❌ **LỖI DỮ LIỆU**")
         return
     
-    # Chờ task auto_check nếu đang chạy
     if rental_id in auto_check_tasks:
         logger.info(f"⏳ Đang có task auto-check cho rental {rental_id}, chờ kết thúc...")
         for _ in range(10):
@@ -1467,11 +1395,8 @@ async def rent_cancel_callback(update: Update, context: Context):
             return
         
         if rental.refunded:
-            logger.warning(f"⚠️ CỐ GẮNG HỦY SỐ ĐÃ HOÀN: {rental_id}")
             await query.edit_message_text(
                 f"❌ **SỐ NÀY ĐÃ ĐƯỢC HOÀN {rental.refund_amount}đ**\n\n"
-                f"📞 {rental.phone_number}\n"
-                f"⏰ Hoàn lúc: {rental.refunded_at.strftime('%H:%M:%S') if rental.refunded_at else 'N/A'}\n\n"
                 f"✅ Mỗi số chỉ được hoàn 1 lần!",
                 parse_mode='Markdown'
             )
@@ -1480,11 +1405,6 @@ async def rent_cancel_callback(update: Update, context: Context):
         refund_amount = rental.price_charged
         expected_balance = user.balance + refund_amount
         
-        logger.info(f"💰 KIỂM TRA CHÉO:")
-        logger.info(f"   Số dư hiện tại: {user.balance}đ")
-        logger.info(f"   Tiền hoàn: +{refund_amount}đ")
-        logger.info(f"   Số dư sau hoàn: {expected_balance}đ")
-        
         if rental.status in ['completed', 'expired', 'cancelled']:
             await query.edit_message_text("❌ **ĐÃ NHẬN OTP**\n\nKhông thể hủy.")
             return
@@ -1492,7 +1412,6 @@ async def rent_cancel_callback(update: Update, context: Context):
         if rental_id in auto_check_tasks:
             try:
                 auto_check_tasks[rental_id].cancel()
-                logger.info(f"🛑 Đã hủy task auto-check cho rental {rental_id}")
                 await asyncio.sleep(0.3)
                 auto_check_tasks.pop(rental_id, None)
             except Exception as e:
@@ -1500,7 +1419,6 @@ async def rent_cancel_callback(update: Update, context: Context):
         
         try:
             url = f"{BASE_URL}/sim/cancel_api_key/{sim_id}?api_key={API_KEY}"
-
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=10) as response:
                     api_data = await response.json()
@@ -1511,7 +1429,6 @@ async def rent_cancel_callback(update: Update, context: Context):
             db.session.refresh(rental)
             
             if rental.refunded:
-                logger.error(f"❌ PHÁT HIỆN RACE CONDITION: rental {rental_id} đã được hoàn")
                 db.session.rollback()
                 await query.edit_message_text("❌ Giao dịch đã được xử lý trước đó")
                 return
@@ -1524,46 +1441,35 @@ async def rent_cancel_callback(update: Update, context: Context):
             rental.refunded_at = get_vn_time()
 
             if api_success:
+                # ===== BƯỚC 1: CẬP NHẬT LOCAL NGAY =====
                 user.balance += refund_amount
+                db.session.commit()
+                
+                logger.info(f"✅ LOCAL UPDATE: User {user.user_id}: {old_balance}đ → {user.balance}đ")
+                
+                # ===== BƯỚC 2: PUSH LÊN RENDER (KHÔNG CHỜ) =====
+                asyncio.create_task(push_balance_async(
+                    user.user_id,
+                    user.balance,
+                    user.username or f"user_{user.user_id}"
+                ))
+                
+                keyboard = [
+                    [InlineKeyboardButton("🆕 THUÊ TIẾP", callback_data="menu_rent")],
+                    [InlineKeyboardButton("💰 XEM SỐ DƯ", callback_data="menu_balance")],
+                    [InlineKeyboardButton("🔙 MENU", callback_data="menu_main")]
+                ]
+                
+                await query.edit_message_text(
+                    f"✅ **HỦY SỐ THÀNH CÔNG!**\n\n"
+                    f"📞 **Số:** {rental.phone_number}\n"
+                    f"💰 **Hoàn tiền:** {refund_amount:,}đ\n"
+                    f"💵 **Số dư mới:** {user.balance:,}đ",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode='Markdown'
+                )
             else:
                 await query.edit_message_text("❌ Không thể hủy số từ server.")
-                return
-            
-            logger.info(f"✅ HOÀN TIỀN THÀNH CÔNG!")
-            logger.info(f"   User: {user.user_id}")
-            logger.info(f"   Rental: {rental_id}")
-            logger.info(f"   Số dư cũ: {old_balance}")
-            logger.info(f"   Tiền hoàn: +{refund_amount}")
-            logger.info(f"   Số dư mới: {user.balance}")
-            logger.info(f"   Expected: {expected_balance}")
-            logger.info(f"   Status: {'MATCH' if user.balance == expected_balance else 'MISMATCH'}")
-            
-            db.session.commit()
-            
-            db.session.refresh(user)
-            db.session.refresh(rental)
-            
-            # ===== PUSH LÊN RENDER BẰNG ASYNC =====
-            asyncio.create_task(push_balance_async(
-                user.user_id,
-                user.balance,
-                user.username or f"user_{user.user_id}"
-            ))
-            
-            keyboard = [
-                [InlineKeyboardButton("🆕 THUÊ TIẾP", callback_data="menu_rent")],
-                [InlineKeyboardButton("💰 XEM SỐ DƯ", callback_data="menu_balance")],
-                [InlineKeyboardButton("🔙 MENU", callback_data="menu_main")]
-            ]
-            
-            await query.edit_message_text(
-                f"✅ **HỦY SỐ THÀNH CÔNG!**\n\n"
-                f"📞 **Số:** {rental.phone_number}\n"
-                f"💰 **Hoàn tiền:** {refund_amount:,}đ\n"
-                f"💵 **Số dư mới:** {user.balance:,}đ",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode='Markdown'
-            )
             
         except Exception as e:
             db.session.rollback()

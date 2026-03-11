@@ -11,6 +11,7 @@ import io
 import csv
 import asyncio
 import time
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -1964,6 +1965,11 @@ def add_money():
     amount = request.form.get('amount', type=int)
     reason = request.form.get('reason', 'Cộng tiền thủ công')
     
+    print(f"\n🔍 DEBUG - Cộng tiền thủ công:")
+    print(f"  User ID: {user_id}")
+    print(f"  Amount: {amount}đ")
+    print(f"  Reason: {reason}")
+    
     if not user_id or not amount or amount < 1000:
         return jsonify({'success': False, 'error': 'Thông tin không hợp lệ'})
     
@@ -1975,28 +1981,7 @@ def add_money():
         old_balance = user.balance
         new_balance = old_balance + amount
         
-        # ===== GỬI LÊN RENDER TRƯỚC =====
-        RENDER_URL = "https://bot-thue-sms-new.onrender.com"
-        push_data = {
-            'user_id': user.user_id,
-            'balance': new_balance,
-            'username': user.username or f"user_{user.user_id}"
-        }
-        
-        try:
-            response = requests.post(
-                f"{RENDER_URL}/api/sync-bidirectional",
-                json=push_data,
-                timeout=5
-            )
-            
-            if response.status_code != 200:
-                return jsonify({'success': False, 'error': 'Không thể đồng bộ lên Render'})
-                
-        except Exception as e:
-            return jsonify({'success': False, 'error': 'Lỗi kết nối Render'})
-        
-        # ===== NẾU RENDER OK, MỚI CẬP NHẬT LOCAL =====
+        # ===== BƯỚC 1: CẬP NHẬT LOCAL NGAY =====
         user.balance = new_balance
         
         transaction_code = f"ADD_{datetime.now().strftime('%Y%m%d%H%M%S')}_{secrets.token_hex(3).upper()}"
@@ -2014,7 +1999,25 @@ def add_money():
         db.session.add(transaction)
         db.session.commit()
         
-        logger.info(f"✅ Cộng tiền thành công: User {user_id}: {old_balance}đ → {new_balance}đ")
+        logger.info(f"✅ LOCAL UPDATE: User {user_id}: {old_balance}đ → {new_balance}đ")
+        
+        # ===== BƯỚC 2: PUSH LÊN RENDER (KHÔNG CHỜ) =====
+        try:
+            RENDER_URL = "https://bot-thue-sms-new.onrender.com"
+            push_data = {
+                'user_id': user.user_id,
+                'balance': user.balance,
+                'username': user.username or f"user_{user.user_id}"
+            }
+            
+            threading.Thread(target=lambda: requests.post(
+                f"{RENDER_URL}/api/sync-bidirectional",
+                json=push_data,
+                timeout=3
+            )).start()
+            logger.info(f"📤 Push lên Render: {user.balance}đ")
+        except Exception as e:
+            logger.error(f"❌ Lỗi push: {e}")
         
         # Gửi Telegram
         message = (
@@ -2049,28 +2052,7 @@ def deduct_money():
         old_balance = user.balance
         new_balance = old_balance - amount
         
-        # ===== GỬI LÊN RENDER TRƯỚC =====
-        RENDER_URL = "https://bot-thue-sms-new.onrender.com"
-        push_data = {
-            'user_id': user.user_id,
-            'balance': new_balance,
-            'username': user.username or f"user_{user.user_id}"
-        }
-        
-        try:
-            response = requests.post(
-                f"{RENDER_URL}/api/sync-bidirectional",
-                json=push_data,
-                timeout=5
-            )
-            
-            if response.status_code != 200:
-                return jsonify({'success': False, 'error': 'Không thể đồng bộ lên Render'})
-                
-        except Exception as e:
-            return jsonify({'success': False, 'error': 'Lỗi kết nối Render'})
-        
-        # ===== NẾU RENDER OK, MỚI CẬP NHẬT LOCAL =====
+        # ===== BƯỚC 1: CẬP NHẬT LOCAL NGAY =====
         user.balance = new_balance
         
         transaction_code = f"DEDUCT_{datetime.now().strftime('%Y%m%d%H%M%S')}_{secrets.token_hex(3).upper()}"
@@ -2088,7 +2070,25 @@ def deduct_money():
         db.session.add(transaction)
         db.session.commit()
         
-        logger.info(f"✅ Trừ tiền thành công: User {user_id}: {old_balance}đ → {new_balance}đ")
+        logger.info(f"✅ LOCAL UPDATE: User {user_id}: {old_balance}đ → {new_balance}đ")
+        
+        # ===== BƯỚC 2: PUSH LÊN RENDER (KHÔNG CHỜ) =====
+        try:
+            RENDER_URL = "https://bot-thue-sms-new.onrender.com"
+            push_data = {
+                'user_id': user.user_id,
+                'balance': user.balance,
+                'username': user.username or f"user_{user.user_id}"
+            }
+            
+            threading.Thread(target=lambda: requests.post(
+                f"{RENDER_URL}/api/sync-bidirectional",
+                json=push_data,
+                timeout=3
+            )).start()
+            logger.info(f"📤 Push lên Render: {user.balance}đ")
+        except Exception as e:
+            logger.error(f"❌ Lỗi push: {e}")
         
         # Gửi Telegram
         message = (

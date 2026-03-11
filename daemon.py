@@ -383,9 +383,14 @@ class UserSyncDaemon:
     
     # ==================== ĐẨY DỮ LIỆU LÊN RENDER ====================
     def pull_user_from_render(self, user_id):
-        """Đồng bộ từ Render về local - LẤY BALANCE CHÍNH XÁC TỪ RENDER"""
+        """Đồng bộ từ Render về local - Render là nguồn chính"""
         try:
             local_balance = self.get_user_balance(user_id)
+            
+            # Kiểm tra xem user này có đang chờ sync không
+            if user_id in self.pending_sync:
+                self.log(f"⏳ User {user_id} đang chờ sync, bỏ qua pull", "INFO")
+                return True
             
             response = requests.post(
                 f"{RENDER_URL}/api/check-user",
@@ -400,15 +405,17 @@ class UserSyncDaemon:
                 if render_balance is None:
                     return False
                 
-                # ===== LUÔN CẬP NHẬT THEO RENDER (NGUỒN SỰ THẬT) =====
+                # ===== SO SÁNH VÀ CẬP NHẬT =====
                 if render_balance != local_balance:
                     diff = render_balance - local_balance
                     self.update_local_balance(user_id, render_balance)
                     
                     if diff > 0:
-                        self.log(f"📥 Cập nhật local từ Render: +{diff}đ (local {local_balance} → {render_balance})", "SUCCESS")
+                        self.log(f"📥 Đồng bộ từ Render: +{diff}đ (local {local_balance} → {render_balance})", "SUCCESS")
+                        self.send_telegram_notification(user_id, render_balance, diff, "NAP")
                     else:
-                        self.log(f"📥 Cập nhật local từ Render: {diff}đ (local {local_balance} → {render_balance})", "INFO")
+                        self.log(f"📥 Đồng bộ từ Render: {diff}đ (local {local_balance} → {render_balance})", "INFO")
+                        self.send_telegram_notification(user_id, render_balance, abs(diff), "DEDUCT")
                 
                 return True
         except Exception as e:
