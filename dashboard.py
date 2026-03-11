@@ -2106,19 +2106,19 @@ def deduct_money():
                 timeout=5
             )
             
-            # Đồng bộ lên Render
-            RENDER_URL = "https://bot-thue-sms-new.onrender.com"
-            push_data = {
-                'user_id': user.user_id,
-                'balance': user.balance,
-                'username': user.username or f"user_{user.user_id}"
-            }
-            
-            requests.post(
-                f"{RENDER_URL}/api/update-balance",
-                json=push_data,
-                timeout=5
-            )
+            # ===== TẮT SYNC RENDER KHI TRỪ TIỀN =====
+            # RENDER_URL = "https://bot-thue-sms-new.onrender.com"
+            # push_data = {
+            #     'user_id': user.user_id,
+            #     'balance': user.balance,
+            #     'username': user.username or f"user_{user.user_id}"
+            # }
+            #
+            # requests.post(
+            #     f"{RENDER_URL}/api/update-balance",
+            #     json=push_data,
+            #     timeout=5
+            # )
             
         except Exception as e:
             logger.error(f"❌ Lỗi đồng bộ: {e}")
