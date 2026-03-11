@@ -515,7 +515,7 @@ def setup_sepay_webhook(app):
                     }
                     
                     # Đồng bộ 2 chiều
-                    bidirectional_sync(user_data, transaction_data)
+                    sync_to_render(user_data)
                     
                 except Exception as e:
                     logger.error(f"❌ Lỗi đồng bộ: {e}")
