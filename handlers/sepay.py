@@ -255,7 +255,7 @@ def sync_bidirectional():
                 user = User(
                     user_id=user_id,
                     username=data.get('username', f'user_{user_id}'),
-                    balance=balance or 0,
+                    balance=balance if balance is not None else 0,
                     created_at=datetime.now()
                 )
                 db.session.add(user)
@@ -266,24 +266,15 @@ def sync_bidirectional():
 
                     old = user.balance
 
-                    # ===== FIX: SYNC TĂNG VÀ GIẢM =====
-                    if balance > old:
-                        diff = balance - old
-                        user.balance += diff
+                    # ===== SYNC TĂNG & GIẢM =====
+                    if old != balance:
+                        user.balance = int(balance)
                         logger.info(
-                            f"🔼 Sync cộng {diff} cho user {user_id}: {old} → {user.balance}"
+                            f"🔄 Đồng bộ balance: {user_id} {old} → {balance}"
                         )
-
-                    elif balance < old:
-                        diff = old - balance
-                        user.balance -= diff
-                        logger.info(
-                            f"🔽 Sync trừ {diff} cho user {user_id}: {old} → {user.balance}"
-                        )
-
                     else:
                         logger.info(
-                            f"⏭️ Bỏ qua sync vì balance không đổi ({balance})"
+                            f"⏭️ Balance không thay đổi ({balance})"
                         )
 
             db.session.commit()
