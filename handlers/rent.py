@@ -616,8 +616,8 @@ async def rent_confirm_callback(update: Update, context: Context):
                 actual_price = sim_data.get('payment', final_price - 1000)
                 
                 existing_rental = Rental.query.filter_by(
-                    phone_number=phone,
-                    status='waiting'
+                    Rental.phone_number == phone,
+                    Rental.status.in_(['waiting','completed'])
                 ).first()
                 
                 if existing_rental:
@@ -671,9 +671,7 @@ async def rent_confirm_callback(update: Update, context: Context):
                     db_user.total_spent += final_price
                     db_user.total_rentals += 1
                     db_user.updated_at = datetime.now()
-                    
-                    await asyncio.sleep(0.3)
-                    
+                                        
                     db.session.commit()
                     db.session.refresh(db_user)
                     
@@ -881,29 +879,32 @@ async def auto_check_otp_task(bot, chat_id: int, otp_id: str, rental_id: int, us
     
     max_checks = 120
     check_count = 0
-    
-    # Cache để tránh xử lý trùng
     processed = False
     
     try:
         while check_count < max_checks and not processed:
-        # === KIỂM TRA THỜI GIAN HẾT HẠN ===
+
+            # === KIỂM TRA HẾT HẠN ===
             with app.app_context():
                 rental = Rental.query.filter_by(id=rental_id).with_for_update().first()
+
                 if rental and rental.status == 'waiting' and not rental.refunded and not rental.otp_code:
                     now = datetime.now()
+
                     if now > rental.expires_at:
-                        logger.info(f"⏰ Rental {rental_id} đã hết hạn (timeout), tiến hành hoàn tiền")
-                        
+
                         if rental.refunded:
                             return
+
+                        logger.info(f"⏰ Rental {rental_id} đã hết hạn (timeout)")
 
                         refund = rental.price_charged
                         user = User.query.filter_by(user_id=rental.user_id).with_for_update().first()
 
                         if user:
-                            old_balance = user.balance
+
                             user.balance += refund
+
                             rental.status = 'expired'
                             rental.refunded = True
                             rental.refund_amount = refund
@@ -915,16 +916,16 @@ async def auto_check_otp_task(bot, chat_id: int, otp_id: str, rental_id: int, us
                                 db.session.rollback()
                                 logger.error(f"DB error refund: {db_error}")
                                 return
-                            
+
                             await bot.send_message(
                                 chat_id=chat_id,
                                 text=f"⏰ **SỐ ĐÃ HẾT HẠN**\n\n"
-                                    f"📞 Số `{phone}` đã hết hạn.\n"
-                                    f"💰 **Đã tự động hoàn lại {refund:,}đ!**\n"
-                                    f"💵 **Số dư mới:** {user.balance:,}đ",
+                                     f"📞 Số `{phone}` đã hết hạn.\n"
+                                     f"💰 **Đã hoàn lại {refund:,}đ!**\n"
+                                     f"💵 **Số dư mới:** {user.balance:,}đ",
                                 parse_mode='Markdown'
                             )
-                            
+
                             if rental_id in auto_check_tasks:
                                 del auto_check_tasks[rental_id]
 
@@ -934,27 +935,25 @@ async def auto_check_otp_task(bot, chat_id: int, otp_id: str, rental_id: int, us
             if task and task.cancelled():
                 logger.info(f"🛑 Task {rental_id} bị hủy")
                 return
-                
+
             check_count += 1
-            logger.info(f"🔄 Auto-check OTP lần {check_count}/{max_checks} cho rental {rental_id}")
-            
+            logger.info(f"🔄 Auto-check OTP {check_count}/{max_checks} rental {rental_id}")
+
             try:
+
                 with app.app_context():
 
                     rental = Rental.query.filter_by(id=rental_id).with_for_update().first()
-                    
+
                     if not rental:
-                        logger.info(f"❌ Rental {rental_id} không tồn tại")
                         return
-                    
+
                     if rental.refunded:
-                        logger.info(f"✅ Rental {rental_id} đã hoàn {rental.refund_amount}đ, dừng auto-check")
                         return
-                    
-                    if rental.status in ['cancelled', 'expired', 'success']:
-                        logger.info(f"✅ Rental {rental_id} đã {rental.status}, dừng auto-check")
+
+                    if rental.status in ['cancelled', 'expired', 'completed']:
                         return
-                
+
                 # ===== API CHECK OTP =====
 
                 url = f"{BASE_URL}/otp/get_otp_by_phone_api_key"
@@ -979,7 +978,7 @@ async def auto_check_otp_task(bot, chat_id: int, otp_id: str, rental_id: int, us
                     continue
 
                 status = response_data.get('status')
-                
+
                 # ===== CÓ OTP =====
                 if status == 200:
 
@@ -991,12 +990,11 @@ async def auto_check_otp_task(bot, chat_id: int, otp_id: str, rental_id: int, us
                     with app.app_context():
 
                         rental = Rental.query.filter_by(id=rental_id).with_for_update().first()
-                        
+
                         if rental and rental.status == 'waiting' and not rental.refunded and not rental.otp_code:
 
-                            rental.status = 'success'
-                            rental.otp_code = otp_code or "Audio OTP"
                             rental.status = "completed"
+                            rental.otp_code = otp_code or "Audio OTP"
                             rental.content = content
                             rental.updated_at = datetime.now()
 
@@ -1008,186 +1006,127 @@ async def auto_check_otp_task(bot, chat_id: int, otp_id: str, rental_id: int, us
                                 return
 
                             processed = True
-                            
+
                             if otp_code:
                                 await bot.send_message(
                                     chat_id=chat_id,
                                     text=f"🔑 **MÃ OTP:** `{otp_code}`\n📝 {content}\n📱 **Dịch vụ:** {service_name}\n📞 **Số:** `{phone}`",
                                     parse_mode='Markdown'
                                 )
-                                logger.info(f"✅ Đã gửi OTP text cho rental {rental_id}")
-                            
+
                             if audio_url:
+
                                 try:
+
                                     await bot.send_message(
                                         chat_id=chat_id,
-                                        text="⏳ **ĐANG TẢI FILE AUDIO OTP...**",
+                                        text="⏳ **ĐANG TẢI AUDIO OTP...**",
                                         parse_mode='Markdown'
                                     )
-                                    
+
                                     headers = {'User-Agent': 'Mozilla/5.0'}
                                     audio_response = requests.get(audio_url, headers=headers, timeout=30)
 
                                     if audio_response.status_code == 200:
+
                                         await bot.send_audio(
                                             chat_id=chat_id,
                                             audio=audio_response.content,
                                             filename=f"otp_audio_{rental_id}.mp3",
                                             title=f"OTP Audio - {service_name}",
-                                            caption=f"📱 **{service_name}**\n📞 `{phone}`",
+                                            caption=f"📱 {service_name}\n📞 `{phone}`",
                                             parse_mode='Markdown'
                                         )
+
                                     else:
+
                                         await bot.send_message(
                                             chat_id=chat_id,
                                             text=f"🔊 **LINK AUDIO OTP**\n\n"
-                                                f"📱 **{service_name}**\n"
-                                                f"📞 `{phone}`\n\n"
-                                                f"[Nhấn vào đây để nghe]({audio_url})",
+                                                 f"[Nghe tại đây]({audio_url})",
                                             parse_mode='Markdown'
                                         )
+
                                 except Exception as e:
                                     logger.error(f"Lỗi tải audio: {e}")
 
-                            elif not otp_code and not audio_url:
-                                await bot.send_message(
-                                    chat_id=chat_id,
-                                    text=f"✅ **ĐÃ NHẬN OTP**\n\n📱 **Dịch vụ:** {service_name}\n📞 **Số:** `{phone}`",
-                                    parse_mode='Markdown'
-                                )
-                            
                             if rental_id in auto_check_tasks:
                                 del auto_check_tasks[rental_id]
 
                             return
-                
+
                 elif status in [202, 312]:
+
+                    # vẫn đang chờ OTP
                     pass
-                
+
                 elif status == 400:
-                    with app.app_context():
 
-                        rental = Rental.query.filter_by(id=rental_id).with_for_update().first()
-                        
-                        if not rental:
-                            return
-                        
-                        if rental.status != 'waiting':
-                            return
-                        
-                        if rental.refunded:
-                            return
-                        
-                        # ===== KIỂM TRA THỜI GIAN TRƯỚC KHI HOÀN =====
-                        now = datetime.now()
-                        if now < rental.expires_at:
-                            # CHƯA HẾT HẠN, KHÔNG HOÀN
-                            logger.info(f"⏳ Rental {rental_id} chưa hết hạn, không hoàn tiền (status 400)")
-                            continue
-                        
-                        refund = rental.price_charged
+                    # ⚠ FIX LỖI: KHÔNG REFUND KHI API TRẢ 400
+                    logger.info(f"⚠ API trả 400 cho rental {rental_id}, tiếp tục chờ OTP")
 
-                        user = User.query.filter_by(user_id=rental.user_id).with_for_update().first()
+                    await asyncio.sleep(5)
+                    continue
 
-                        if not user:
-                            rental.status = 'expired'
-                            rental.updated_at = datetime.now()
-                            db.session.commit()
-                            return
-                        
-                        old_balance = user.balance
-                        expected_balance = user.balance + refund
-
-                        user.balance += refund
-                        rental.refunded = True
-                        rental.refund_amount = refund
-                        rental.refunded_at = now
-
-                        if user.balance == expected_balance:
-
-                            if now >= rental.expires_at:
-                                rental.status = 'expired'
-
-                            rental.updated_at = now
-
-                            try:
-                                db.session.commit()
-                            except Exception as db_error:
-                                db.session.rollback()
-                                logger.error(db_error)
-                                return
-
-                            await bot.send_message(
-                                chat_id=chat_id,
-                                text=f"⏰ **SỐ ĐÃ HẾT HẠN**\n\n"
-                                    f"📞 Số `{phone}` đã hết hạn.\n"
-                                    f"💰 **Đã tự động hoàn lại {refund:,}đ vào tài khoản!**\n"
-                                    f"💵 **Số dư mới:** {user.balance:,}đ",
-                                parse_mode='Markdown'
-                            )
-
-                            if rental_id in auto_check_tasks:
-                                del auto_check_tasks[rental_id]
-
-                            return
-                        else:
-                            db.session.rollback()
-                            return
-                            
             except Exception as e:
                 logger.error(f"Lỗi auto-check: {e}")
-            
+
             await asyncio.sleep(5)
-        
+
+        # ===== HẾT VÒNG LẶP =====
+
         if not processed:
+
             with app.app_context():
 
                 rental = Rental.query.filter_by(id=rental_id).with_for_update().first()
-                
+
                 if rental and rental.status == 'waiting' and not rental.refunded and not rental.otp_code:
 
-                    # ===== KIỂM TRA THỜI GIAN TRƯỚC KHI HOÀN =====
                     now = datetime.now()
+
                     if now < rental.expires_at:
-                        logger.info(f"⏳ Rental {rental_id} chưa hết hạn, không hoàn tiền (end of loop)")
                         return
 
                     user = User.query.filter_by(user_id=rental.user_id).with_for_update().first()
-                    
+
                     if user:
 
                         refund = rental.price_charged
-                        old_balance = user.balance
-                        
+
                         user.balance += refund
+
                         rental.status = 'expired'
                         rental.refunded = True
                         rental.refund_amount = refund
                         rental.refunded_at = now
-                        
+
                         try:
                             db.session.commit()
                         except Exception as db_error:
                             db.session.rollback()
                             logger.error(db_error)
                             return
-                        
+
                         await bot.send_message(
                             chat_id=chat_id,
                             text=f"⏰ **SỐ ĐÃ HẾT HẠN**\n\n"
-                                f"📞 Số `{phone}` đã hết thời gian chờ OTP.\n"
-                                f"💰 **ĐÃ TỰ ĐỘNG HOÀN LẠI {refund:,}Đ!**\n"
-                                f"💵 **Số dư mới:** {user.balance:,}đ",
+                                 f"📞 `{phone}` đã hết thời gian chờ OTP.\n"
+                                 f"💰 **Đã hoàn lại {refund:,}đ**\n"
+                                 f"💵 **Số dư mới:** {user.balance:,}đ",
                             parse_mode='Markdown'
                         )
-            
+
             if rental_id in auto_check_tasks:
                 del auto_check_tasks[rental_id]
-            
+
     except asyncio.CancelledError:
+
         logger.info(f"🛑 Task {rental_id} bị hủy")
+
         if rental_id in auto_check_tasks:
             del auto_check_tasks[rental_id]
+
         raise
 
 async def rent_view_callback(update: Update, context: Context):
@@ -1469,12 +1408,14 @@ async def rent_cancel_callback(update: Update, context: Context):
         await query.edit_message_text("❌ **LỖI DỮ LIỆU**")
         return
     
+    # Chờ task auto_check nếu đang chạy (an toàn hơn sleep cố định)
     if rental_id in auto_check_tasks:
-        logger.info(f"⏳ Đang có task auto-check cho rental {rental_id}, chờ 0.5s")
-        await asyncio.sleep(0.5)
-        if rental_id not in auto_check_tasks:
-            logger.info(f"✅ Task auto-check đã kết thúc, tiếp tục xử lý hủy")
-    
+        logger.info(f"⏳ Đang có task auto-check cho rental {rental_id}, chờ kết thúc...")
+        for _ in range(10):
+            if rental_id not in auto_check_tasks:
+                break
+            await asyncio.sleep(0.2)
+
     with app.app_context():
         rental = Rental.query.filter_by(id=rental_id).with_for_update().first()
         
@@ -1499,14 +1440,15 @@ async def rent_cancel_callback(update: Update, context: Context):
             )
             return
         
-        expected_balance = user.balance + rental.price_charged
+        refund_amount = rental.price_charged
+        expected_balance = user.balance + refund_amount
         
         logger.info(f"💰 KIỂM TRA CHÉO:")
         logger.info(f"   Số dư hiện tại: {user.balance}đ")
-        logger.info(f"   Tiền hoàn: +{rental.price_charged}đ")
+        logger.info(f"   Tiền hoàn: +{refund_amount}đ")
         logger.info(f"   Số dư sau hoàn: {expected_balance}đ")
         
-        if rental.status == 'success':
+        if rental.status in ['completed', 'expired', 'cancelled']:
             await query.edit_message_text("❌ **ĐÃ NHẬN OTP**\n\nKhông thể hủy.")
             return
         
@@ -1514,7 +1456,7 @@ async def rent_cancel_callback(update: Update, context: Context):
             try:
                 auto_check_tasks[rental_id].cancel()
                 logger.info(f"🛑 Đã hủy task auto-check cho rental {rental_id}")
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.3)
                 auto_check_tasks.pop(rental_id, None)
             except Exception as e:
                 logger.error(f"Lỗi hủy task: {e}")
@@ -1538,21 +1480,17 @@ async def rent_cancel_callback(update: Update, context: Context):
                 return
             
             old_balance = user.balance
-            refund_amount = rental.price_charged
-            
-            if user.balance + refund_amount != expected_balance:
-                logger.error(f"❌ PHÁT HIỆN BẤT THƯỜNG:")
-                logger.error(f"   user.balance ({user.balance}) + refund ({refund_amount}) = {user.balance + refund_amount}")
-                logger.error(f"   expected_balance = {expected_balance}")
-                await query.edit_message_text("❌ LỖI HỆ THỐNG: Phát hiện bất thường số dư")
-                return
             
             rental.status = 'cancelled'
             rental.refunded = True
             rental.refund_amount = refund_amount
-            rental.refunded_at = datetime.utcnow()
-            
-            user.balance += refund_amount
+            rental.refunded_at = get_vn_time()
+
+            if api_success:
+                user.balance += refund_amount
+            else:
+                await query.edit_message_text("❌ Không thể hủy số từ server.")
+                return
             
             logger.info(f"✅ HOÀN TIỀN THÀNH CÔNG!")
             logger.info(f"   User: {user.user_id}")
@@ -1636,7 +1574,7 @@ async def rent_list_callback(update: Update, context: Context):
         for rental in waiting_rentals:
 
             if rental.expires_at:
-                expires_in = int((rental.expires_at - datetime.utcnow()).total_seconds() / 60)
+                expires_in = int((rental.expires_at - get_vn_time()).total_seconds() / 60)
             else:
                 expires_in = -1
 
