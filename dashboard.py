@@ -170,6 +170,13 @@ BASE_TEMPLATE = '''
         .nav-link:hover { background: rgba(255,255,255,0.15); border-radius: 10px; }
         .badge-count { font-size: 0.8rem; padding: 0.4rem 0.6rem; }
         .message-preview { max-height: 200px; overflow-y: auto; background: #f8f9fa; padding: 15px; border-radius: 10px; }
+        .highlight-update {
+            animation: highlight 1s ease;
+        }
+        @keyframes highlight {
+            0% { background-color: #d1fae5; }
+            100% { background-color: transparent; }
+        }
     </style>
 </head>
 <body>
@@ -327,15 +334,15 @@ BASE_TEMPLATE = '''
                     
                     let html = '';
                     users.forEach(user => {
-                        html += `<tr>
+                        html += `<tr data-user-id="${user.user_id}">
                             <td><input type="checkbox" class="user-checkbox" value="${user.user_id}"></td>
                             <td>${user.id}</td>
                             <td><code>${user.user_id}</code></td>
                             <td>@${user.username || 'N/A'}</td>
-                            <td class="fw-bold text-success">${user.balance.toLocaleString()}đ</td>
-                            <td>${user.total_rentals}</td>
+                            <td class="fw-bold text-success balance-cell">${user.balance.toLocaleString()}đ</td>
+                            <td class="rentals-cell">${user.total_rentals}</td>
                             <td>${user.total_spent.toLocaleString()}đ</td>
-                            <td class="text-success fw-bold">${user.profit.toLocaleString()}đ</td>
+                            <td class="text-success fw-bold profit-cell">${user.profit.toLocaleString()}đ</td>
                             <td>${user.created_at}</td>
                             <td><span class="badge bg-${user.is_banned ? 'danger' : 'success'}">${user.is_banned ? 'Bị khóa' : 'Hoạt động'}</span></td>
                             <td>
@@ -380,6 +387,128 @@ BASE_TEMPLATE = '''
         
         // Chạy update mỗi 1 giây
         setInterval(updateData, 1000);
+        
+        // ===== CẬP NHẬT REALTIME CHO DASHBOARD =====
+        function updateRealtimeData() {
+            const path = window.location.pathname;
+            
+            // Cập nhật trang users
+            if (path === '/users') {
+                fetch('/api/users/list?_=' + new Date().getTime())
+                    .then(response => response.json())
+                    .then(users => {
+                        users.forEach(user => {
+                            // Tìm dòng tương ứng trong bảng
+                            let row = document.querySelector(`tr[data-user-id="${user.user_id}"]`);
+                            if (row) {
+                                let updated = false;
+                                
+                                // Cập nhật số dư (cột thứ 5)
+                                let balanceCell = row.querySelector('.balance-cell');
+                                if (balanceCell) {
+                                    let oldBalance = balanceCell.textContent;
+                                    let newBalance = user.balance.toLocaleString() + 'đ';
+                                    if (oldBalance !== newBalance) {
+                                        balanceCell.textContent = newBalance;
+                                        updated = true;
+                                    }
+                                }
+                                
+                                // Cập nhật số lần thuê (cột thứ 6)
+                                let rentalsCell = row.querySelector('.rentals-cell');
+                                if (rentalsCell) {
+                                    let oldRentals = rentalsCell.textContent;
+                                    let newRentals = user.total_rentals;
+                                    if (oldRentals != newRentals) {
+                                        rentalsCell.textContent = newRentals;
+                                        updated = true;
+                                    }
+                                }
+                                
+                                // Cập nhật lợi nhuận (cột thứ 8)
+                                let profitCell = row.querySelector('.profit-cell');
+                                if (profitCell) {
+                                    let oldProfit = profitCell.textContent;
+                                    let newProfit = user.profit.toLocaleString() + 'đ';
+                                    if (oldProfit !== newProfit) {
+                                        profitCell.textContent = newProfit;
+                                        updated = true;
+                                    }
+                                }
+                                
+                                // Highlight nếu có thay đổi
+                                if (updated) {
+                                    row.classList.add('highlight-update');
+                                    setTimeout(() => {
+                                        row.classList.remove('highlight-update');
+                                    }, 1000);
+                                }
+                            }
+                        });
+                    })
+                    .catch(error => console.log('Realtime update error:', error));
+            }
+            
+            // Cập nhật dashboard
+            else if (path === '/') {
+                fetch('/api/stats?_=' + new Date().getTime())
+                    .then(response => response.json())
+                    .then(stats => {
+                        // Cập nhật số liệu thống kê
+                        const statNumbers = document.querySelectorAll('.stat-number');
+                        if (statNumbers.length >= 4) {
+                            statNumbers[0].textContent = stats.total_users.toLocaleString();
+                            statNumbers[1].textContent = stats.new_users.toLocaleString();
+                            statNumbers[2].textContent = stats.total_orders.toLocaleString();
+                            statNumbers[3].textContent = stats.success_orders.toLocaleString();
+                        }
+                        
+                        // Cập nhật doanh thu
+                        let revenueEl = document.querySelector('.stat-number.text-success');
+                        if (revenueEl) revenueEl.textContent = stats.revenue.toLocaleString() + 'đ';
+                        
+                        // Cập nhật chi phí
+                        let costEl = document.querySelector('.stat-number.text-danger');
+                        if (costEl) costEl.textContent = stats.cost.toLocaleString() + 'đ';
+                        
+                        // Cập nhật lợi nhuận
+                        let profitEl = document.querySelector('.profit-number');
+                        if (profitEl) profitEl.textContent = stats.profit.toLocaleString() + 'đ';
+                    });
+            }
+            
+            // Cập nhật chi tiết user
+            else if (path.startsWith('/user/')) {
+                const userId = path.split('/').pop();
+                fetch(`/api/user/${userId}?_=` + new Date().getTime())
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.error) return;
+                        
+                        // Cập nhật số dư trong phần thông tin user
+                        let balanceElement = document.querySelector('.text-success.fw-bold.fs-5');
+                        if (balanceElement) {
+                            // Lấy balance từ API users/list hoặc từ data hiện tại
+                            fetch('/api/users/list?_=' + new Date().getTime())
+                                .then(response => response.json())
+                                .then(users => {
+                                    let user = users.find(u => u.user_id == userId);
+                                    if (user) {
+                                        balanceElement.textContent = user.balance.toLocaleString() + 'đ';
+                                    }
+                                });
+                        }
+                    });
+            }
+        }
+
+        // Chạy cập nhật realtime mỗi 3 giây
+        setInterval(updateRealtimeData, 3000);
+        
+        // Chạy ngay khi load trang
+        document.addEventListener('DOMContentLoaded', function() {
+            updateRealtimeData();
+        });
         
         // Các hàm xử lý modal
         let selectedUsers = [];
@@ -627,6 +756,8 @@ USERS_TEMPLATE = '''
     </div>
     <div class="card-body">
         <input type="text" id="searchInput" class="search-box mb-4 w-100" placeholder="🔍 Tìm kiếm User ID, Username, Số dư...">
+        
+        <!-- Bảng danh sách users -->
         <table id="usersTable" class="table table-striped table-hover datatable">
             <thead>
                 <tr>
@@ -645,15 +776,15 @@ USERS_TEMPLATE = '''
             </thead>
             <tbody>
                 {% for user in users %}
-                <tr>
+                <tr data-user-id="{{ user.user_id }}">
                     <td><input type="checkbox" class="user-checkbox" value="{{ user.user_id }}"></td>
                     <td>{{ user.id }}</td>
                     <td><code>{{ user.user_id }}</code></td>
                     <td>@{{ user.username or 'N/A' }}</td>
-                    <td class="fw-bold text-success">{{ "{:,.0f}".format(user.balance) }}đ</td>
-                    <td>{{ user.total_rentals }}</td>
+                    <td class="fw-bold text-success balance-cell">{{ "{:,.0f}".format(user.balance) }}đ</td>
+                    <td class="rentals-cell">{{ user.total_rentals }}</td>
                     <td>{{ "{:,.0f}".format(user.total_spent) }}đ</td>
-                    <td class="text-success fw-bold">{{ "{:,.0f}".format(user.profit or 0) }}đ</td>
+                    <td class="text-success fw-bold profit-cell">{{ "{:,.0f}".format(user.profit or 0) }}đ</td>
                     <td>{{ user.created_at.strftime('%d/%m/%Y %H:%M') }}</td>
                     <td><span class="badge bg-{{ 'danger' if user.is_banned else 'success' }}">{{ 'Bị khóa' if user.is_banned else 'Hoạt động' }}</span></td>
                     <td>
@@ -774,8 +905,63 @@ USERS_TEMPLATE = '''
     </div>
 </div>
 
+<!-- Modal chi tiết số thuê của user -->
+<div class="modal fade" id="userRentalsModal" tabindex="-1" data-bs-backdrop="static">
+    <div class="modal-dialog modal-xl modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header bg-primary text-white">
+                <h5 class="modal-title"><i class="bi bi-phone"></i> 100 Số Thuê Gần Nhất - <span id="modalUserName"></span></h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="row mb-3">
+                    <div class="col-md-6">
+                        <strong>User ID:</strong> <code id="modalUserId"></code>
+                    </div>
+                    <div class="col-md-6">
+                        <strong>Tổng số thuê:</strong> <span id="modalTotalRentals" class="badge bg-primary"></span>
+                    </div>
+                </div>
+                
+                <div class="table-responsive">
+                    <table class="table table-striped table-hover" id="modalRentalsTable">
+                        <thead>
+                            <tr>
+                                <th>Thời gian</th>
+                                <th>Số điện thoại</th>
+                                <th>Dịch vụ</th>
+                                <th>Giá thuê</th>
+                                <th>OTP</th>
+                                <th>Trạng thái</th>
+                                <th>Hết hạn</th>
+                                <th>Thao tác</th>
+                            </tr>
+                        </thead>
+                        <tbody id="modalRentalsBody">
+                            <tr>
+                                <td colspan="8" class="text-center">
+                                    <div class="spinner-border text-primary" role="status">
+                                        <span class="visually-hidden">Đang tải...</span>
+                                    </div>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Đóng</button>
+                <button type="button" class="btn btn-primary" onclick="refreshUserRentals()">
+                    <i class="bi bi-arrow-repeat"></i> Làm mới
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script>
 let selectedUsers = [];
+let currentUserId = null;
 
 function toggleAll() {
     let checkboxes = document.querySelectorAll('.user-checkbox');
@@ -847,6 +1033,101 @@ function broadcastToAll() {
     new bootstrap.Modal(document.getElementById('sendMessageModal')).show();
 }
 
+// Xem chi tiết số thuê của user
+function viewUserRentals(userId, username) {
+    currentUserId = userId;
+    document.getElementById('modalUserName').innerText = username || 'User ' + userId;
+    document.getElementById('modalUserId').innerText = userId;
+    
+    const modal = new bootstrap.Modal(document.getElementById('userRentalsModal'));
+    modal.show();
+    
+    loadUserRentals(userId);
+}
+
+// Tải 100 số thuê gần nhất của user
+function loadUserRentals(userId) {
+    const tbody = document.getElementById('modalRentalsBody');
+    tbody.innerHTML = '<tr><td colspan="8" class="text-center"><div class="spinner-border text-primary"></div></td></tr>';
+    
+    fetch(`/api/user-recent-rentals/${userId}?_=` + new Date().getTime())
+        .then(response => response.json())
+        .then(data => {
+            if (data.error) {
+                tbody.innerHTML = `<tr><td colspan="8" class="text-center text-danger">${data.error}</td></tr>`;
+                return;
+            }
+            
+            document.getElementById('modalTotalRentals').innerText = data.total_rentals || 0;
+            
+            if (!data.recent_rentals || data.recent_rentals.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="8" class="text-center">Chưa có số thuê nào</td></tr>';
+                return;
+            }
+            
+            let html = '';
+            data.recent_rentals.forEach(r => {
+                let statusClass = 'warning';
+                let statusText = '⏳ Chờ OTP';
+                let actions = '';
+                
+                if (r.status === 'success') {
+                    statusClass = 'success';
+                    statusText = '✅ Thành công';
+                } else if (r.status === 'cancelled') {
+                    statusClass = 'danger';
+                    statusText = '❌ Đã hủy';
+                } else if (r.status === 'expired') {
+                    statusClass = 'secondary';
+                    statusText = '⏰ Hết hạn';
+                } else if (r.status === 'waiting') {
+                    actions = `
+                        <button class="btn btn-sm btn-primary" onclick="checkOTP('${r.otp_id}', ${r.id})">
+                            <i class="bi bi-search"></i>
+                        </button>
+                    `;
+                }
+                
+                let otpDisplay = r.otp ? `<code>${r.otp}</code>` : '—';
+                if (r.otp && r.otp.includes('Audio')) {
+                    otpDisplay = '<span class="badge bg-info">🔊 Audio</span>';
+                }
+                
+                html += `<tr>
+                    <td><small>${r.created_at}</small></td>
+                    <td><code>${r.phone}</code></td>
+                    <td>${r.service}</td>
+                    <td class="fw-bold text-danger">${r.price.toLocaleString()}đ</td>
+                    <td>${otpDisplay}</td>
+                    <td><span class="badge bg-${statusClass}">${statusText}</span></td>
+                    <td><small>${r.expires_at || '—'}</small></td>
+                    <td>${actions}</td>
+                </tr>`;
+            });
+            
+            tbody.innerHTML = html;
+        })
+        .catch(error => {
+            tbody.innerHTML = '<tr><td colspan="8" class="text-center text-danger">Lỗi tải dữ liệu</td></tr>';
+            console.log('Lỗi:', error);
+        });
+}
+
+// Làm mới danh sách
+function refreshUserRentals() {
+    if (currentUserId) {
+        loadUserRentals(currentUserId);
+    }
+}
+
+// Cập nhật realtime mỗi 5 giây (chỉ khi modal đang mở)
+setInterval(() => {
+    if (document.getElementById('userRentalsModal').classList.contains('show') && currentUserId) {
+        loadUserRentals(currentUserId);
+    }
+}, 5000);
+
+// Các hàm xử lý form
 document.getElementById('addMoneyForm').addEventListener('submit', function(e) {
     e.preventDefault();
     fetch('/add_money', {
@@ -915,12 +1196,18 @@ document.getElementById('sendMessageForm').addEventListener('submit', function(e
 
 function toggleBan(userId) {
     if(confirm('Bạn chắc chắn muốn thay đổi trạng thái khóa user này?')) {
-        fetch('/toggle_ban', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({user_id: userId})})
+        fetch('/toggle_ban', {
+            method: 'POST', 
+            headers: {'Content-Type': 'application/json'}, 
+            body: JSON.stringify({user_id: userId})
+        })
         .then(() => location.reload());
     }
 }
 
-function exportToExcel() { window.location.href = '/export_users'; }
+function exportToExcel() { 
+    window.location.href = '/export_users'; 
+}
 
 document.getElementById('searchInput').addEventListener('keyup', function() {
     let val = this.value.toLowerCase();
@@ -1534,6 +1821,34 @@ def api_users_list():
                 'is_banned': u.is_banned
             })
         return jsonify(users_data)
+@app.route('/api/check-otp/<otp_id>/<int:rental_id>', methods=['POST'])
+def api_check_otp(otp_id, rental_id):
+    """API kiểm tra OTP từ dashboard"""
+    # Gọi hàm check OTP từ rent.py
+    from handlers.rent import check_otp_manual
+    result = check_otp_manual(otp_id, rental_id)
+    return jsonify(result)
+
+@app.route('/api/cancel-rental/<sim_id>/<int:rental_id>', methods=['POST'])
+def api_cancel_rental(sim_id, rental_id):
+    """API hủy số từ dashboard"""
+    # Gọi hàm cancel từ rent.py
+    from handlers.rent import cancel_rental_manual
+    result = cancel_rental_manual(sim_id, rental_id)
+    return jsonify(result)
+
+@app.route('/api/reuse-number', methods=['POST'])
+def api_reuse_number():
+    """API thuê lại số từ dashboard"""
+    data = request.json
+    user_id = data.get('user_id')
+    phone = data.get('phone')
+    service_id = data.get('service_id')
+    
+    # Gọi hàm reuse từ rent.py
+    from handlers.rent import reuse_number_manual
+    result = reuse_number_manual(user_id, phone, service_id)
+    return jsonify(result)
 
 @app.route('/api/user/<int:user_id>')
 def api_user_detail(user_id):
@@ -1646,6 +1961,46 @@ def users():
         BASE_TEMPLATE.replace('{% block content %}{% endblock %}', USERS_TEMPLATE),
         users=users_with_profit, now=datetime.now()
     )
+@app.route('/api/user-recent-rentals/<int:user_id>')
+def api_user_recent_rentals(user_id):
+    """API trả về 100 số thuê gần nhất của một user"""
+    with app.app_context():
+        # Tìm user trong database
+        user = User.query.filter_by(user_id=user_id).first()
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+        
+        # Lấy 100 rental gần nhất của user
+        recent_rentals = Rental.query.filter_by(
+            user_id=user.id
+        ).order_by(
+            Rental.created_at.desc()
+        ).limit(100).all()
+        
+        result = []
+        for r in recent_rentals:
+            result.append({
+                'id': r.id,
+                'phone': r.phone_number,
+                'service': r.service_name,
+                'price': r.price_charged,
+                'status': r.status,
+                'otp': r.otp_code,
+                'otp_id': r.otp_id,
+                'sim_id': r.sim_id,
+                'created_at': r.created_at.strftime('%H:%M:%S %d/%m/%Y'),
+                'expires_at': r.expires_at.strftime('%H:%M:%S %d/%m/%Y') if r.expires_at else None,
+                'refunded': r.refunded,
+                'refund_amount': r.refund_amount
+            })
+        
+        return jsonify({
+            'user_id': user.user_id,
+            'username': user.username,
+            'total_rentals': user.total_rentals,
+            'recent_rentals': result
+        })
+
 
 @app.route('/user/<int:user_id>')
 def user_detail(user_id):
