@@ -615,9 +615,10 @@ async def rent_confirm_callback(update: Update, context: Context):
                 sim_id = sim_data.get('simId')
                 actual_price = sim_data.get('payment', final_price - 1000)
                 
-                existing_rental = Rental.query.filter_by(
+                # Tìm rental đang active với số điện thoại này
+                existing_rental = Rental.query.filter(
                     Rental.phone_number == phone,
-                    Rental.status.in_(['waiting','completed'])
+                    Rental.status.in_(['waiting', 'completed'])
                 ).first()
                 
                 if existing_rental:
