@@ -1476,23 +1476,27 @@ async def rent_cancel_callback(update: Update, context: Context):
             logger.error(f"❌ LỖI: {e}")
             await query.edit_message_text(f"❌ **LỖI**\n\n{str(e)}")
 async def rent_list_callback(update: Update, context: Context):
-    """Hiển thị danh sách số đang thuê - CÓ NÚT HỦY CHO SỐ CHỜ OTP"""
+    """Hiển thị danh sách số đang thuê - HIỂN THỊ 20 SỐ THÀNH CÔNG GẦN NHẤT"""
     query = update.callback_query
     await safe_answer_callback(query)
     
     user = update.effective_user
     
     with app.app_context():
+        # Số đang chờ OTP
         waiting_rentals = Rental.query.filter(
             Rental.user_id == user.id,
-            Rental.status == 'waiting'
+            Rental.status == 'waiting',
+            Rental.refunded == False
         ).order_by(Rental.created_at.desc()).all()
         
+        # ===== ĐÃ SỬA: TĂNG LIMIT LÊN 20 SỐ THÀNH CÔNG GẦN NHẤT =====
         recent_rentals = Rental.query.filter(
             Rental.user_id == user.id,
             Rental.status == 'success'
-        ).order_by(Rental.created_at.desc()).limit(10).all()
+        ).order_by(Rental.created_at.desc()).limit(20).all()  # <--- TĂNG LÊN 20
         
+        # Số đã hủy/hết hạn (giữ 5 số)
         old_rentals = Rental.query.filter(
             Rental.user_id == user.id,
             Rental.status.in_(['cancelled', 'expired'])
@@ -1518,10 +1522,10 @@ async def rent_list_callback(update: Update, context: Context):
     text = "📋 **DANH SÁCH SỐ CỦA BẠN**\n\n"
     keyboard = []
     
+    # HIỂN THỊ SỐ ĐANG CHỜ OTP
     if waiting_rentals:
         text += "🟢 **ĐANG CHỜ OTP:**\n"
         for rental in waiting_rentals:
-
             if rental.expires_at:
                 expires_in = int((rental.expires_at - get_vn_time()).total_seconds() / 60)
             else:
@@ -1546,10 +1550,15 @@ async def rent_list_callback(update: Update, context: Context):
             ])
         text += "\n"
     
+    # ===== ĐÃ SỬA: HIỂN THỊ 20 SỐ THÀNH CÔNG GẦN NHẤT =====
     if recent_rentals:
-        text += "✅ **ĐÃ NHẬN OTP GẦN ĐÂY:**\n"
+        text += f"✅ **ĐÃ NHẬN OTP (20 SỐ GẦN NHẤT):**\n"
         for rental in recent_rentals:
             otp_display = rental.otp_code or "Audio OTP"
+            # Cắt ngắn OTP nếu quá dài
+            if len(otp_display) > 10:
+                otp_display = otp_display[:10] + "..."
+            
             text += f"• `{rental.phone_number}` - {rental.service_name} - OTP: {otp_display}\n"
             
             keyboard.append([
@@ -1558,14 +1567,17 @@ async def rent_list_callback(update: Update, context: Context):
                     callback_data=f"rent_reuse_{rental.phone_number}_{rental.service_id}"
                 )
             ])
-        text += "\n"
+        text += f"\n📌 *Hiển thị {len(recent_rentals)}/20 số thành công gần nhất*\n\n"
     
+    # HIỂN THỊ SỐ ĐÃ HỦY/HẾT HẠN
     if old_rentals:
-        text += "⏰ **ĐÃ HẾT HẠN/HỦY:**\n"
+        text += "⏰ **ĐÃ HẾT HẠN/HỦY (5 số gần nhất):**\n"
         for rental in old_rentals:
             status_icon = "❌" if rental.status == 'cancelled' else "⏰"
             text += f"• {status_icon} `{rental.phone_number}` - {rental.service_name}\n"
+        text += "\n"
     
+    # NÚT ĐIỀU HƯỚNG
     keyboard.append([InlineKeyboardButton("🆕 THUÊ SỐ MỚI", callback_data="menu_rent")])
     keyboard.append([InlineKeyboardButton("🔙 MENU CHÍNH", callback_data="menu_main")])
     
