@@ -1493,7 +1493,7 @@ async def rent_list_callback(update: Update, context: Context):
         # ===== ĐÃ SỬA: TĂNG LIMIT LÊN 20 SỐ THÀNH CÔNG GẦN NHẤT =====
         recent_rentals = Rental.query.filter(
             Rental.user_id == user.id,
-            Rental.status == 'success'
+            Rental.status.in_(['completed', 'success'])
         ).order_by(Rental.created_at.desc()).limit(20).all()  # <--- TĂNG LÊN 20
         
         # Số đã hủy/hết hạn (giữ 5 số)
