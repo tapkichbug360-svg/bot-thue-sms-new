@@ -662,12 +662,16 @@ async def rent_confirm_callback(update: Update, context: Context):
                     [InlineKeyboardButton("🔙 MENU CHÍNH", callback_data="menu_main")]
                 ]
 
+                # Sau khi commit thành công và push lên Render
                 await loading_msg.edit_text(
                     f"✅ **THUÊ SỐ THÀNH CÔNG!**\n\n"
                     f"📞 **Số:** `{phone}`\n"
                     f"📱 **Dịch vụ:** {rent_info['service_name']}\n"
                     f"💰 **Đã thanh toán:** {final_price:,}đ\n"
-                    f"💵 **Số dư còn lại:** {db_user.balance:,}đ",
+                    f"💵 **Số dư còn lại:** {db_user.balance:,}đ\n\n"
+                    f"⏳ **Vui lòng chờ, hệ thống sẽ tự động gửi OTP cho quý khách khi nhận được!**\n"
+                    f"🤖 Bot sẽ tự động kiểm tra OTP trong vài phút tới.\n\n"
+                    f"📌 Bạn có thể kiểm tra OTP thủ công bằng nút '🔍 KIỂM TRA OTP'.",
                     reply_markup=InlineKeyboardMarkup(keyboard),
                     parse_mode='Markdown'
                 )
@@ -1342,8 +1346,12 @@ async def rent_reuse_callback(update: Update, context: Context):
                 await query.edit_message_text(
                     f"✅ **THUÊ LẠI SỐ THÀNH CÔNG!**\n\n"
                     f"📞 **Số:** `{phone}`\n"
-                    f"💰 **Đã thanh toán:** {price}đ\n"
-                    f"💵 **Số dư còn lại:** {db_user.balance}đ",
+                    f"📱 **Dịch vụ:** {service_name}\n"
+                    f"💰 **Đã thanh toán:** {price:,}đ\n"
+                    f"💵 **Số dư còn lại:** {db_user.balance:,}đ\n\n"
+                    f"⏳ **Vui lòng chờ, hệ thống sẽ tự động gửi OTP cho quý khách khi nhận được!**\n"
+                    f"🤖 Bot sẽ tự động kiểm tra OTP trong vài phút tới.\n\n"
+                    f"📌 Bạn có thể kiểm tra OTP thủ công bằng nút '🔍 KIỂM TRA OTP'.",
                     reply_markup=reply_markup,
                     parse_mode='Markdown'
                 )
