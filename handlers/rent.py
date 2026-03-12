@@ -687,9 +687,24 @@ async def rent_confirm_callback(update: Update, context: Context):
 
         else:
             error_msg = response_data.get('message', 'Không rõ lỗi')
+            error_code = response_data.get('code', '')
+            
+            # Log chi tiết
+            logger.error(f"❌ API trả lỗi: code={error_code}, message={error_msg}")
+            logger.error(f"   Full response: {response_data}")
+            
+            # Hiển thị cho user
+            display_msg = f"❌ {error_msg}"
+            if error_code:
+                display_msg = f"❌ [{error_code}] {error_msg}"
+            
             await loading_msg.edit_text(
-                f"❌ **LỖI TỪ SERVER**\n\n{error_msg}",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 QUAY LẠI", callback_data="menu_rent")]]),
+                f"❌ **LỖI TỪ SERVER**\n\n"
+                f"📢 {display_msg}\n\n"
+                f"💡 Sim quý khách vừa chọn đã hết vui lòng chọn sim khác.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 QUAY LẠI", callback_data="menu_rent")
+                ]]),
                 parse_mode='Markdown'
             )
 
