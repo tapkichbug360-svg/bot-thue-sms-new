@@ -664,12 +664,12 @@ async def rent_confirm_callback(update: Update, context: Context):
 
                 # Sau khi commit thành công và push lên Render
                 await loading_msg.edit_text(
-                    f"✅ **THUÊ SỐ THÀNH CÔNG!**\n\n"
-                    f"📞 **Số:** `{phone}`\n"
-                    f"📱 **Dịch vụ:** {rent_info['service_name']}\n"
-                    f"💰 **Đã thanh toán:** {final_price:,}đ\n"
-                    f"💵 **Số dư còn lại:** {db_user.balance:,}đ\n\n"
-                    f"⏳ **Vui lòng chờ, hệ thống sẽ tự động gửi OTP cho quý khách khi nhận được!**\n"
+                    f"✅ <b>THUÊ SỐ THÀNH CÔNG!</b>\n\n"
+                    f"📞 <b>Số:</b> <code>{phone}</code>\n"
+                    f"📱 <b>Dịch vụ:</b> {rent_info['service_name']}\n"
+                    f"💰 <b>Đã thanh toán:</b> {final_price:,}đ\n"
+                    f"💵 <b>Số dư còn lại:</b> {db_user.balance:,}đ\n\n"
+                    f"⏳ Vui lòng chờ, hệ thống sẽ tự động gửi OTP cho quý khách khi nhận được!\n"
                     f"🤖 Bot sẽ tự động kiểm tra OTP trong vài phút tới.\n\n"
                     f"📌 Bạn có thể kiểm tra OTP thủ công bằng nút '🔍 KIỂM TRA OTP'.",
                     reply_markup=InlineKeyboardMarkup(keyboard),
