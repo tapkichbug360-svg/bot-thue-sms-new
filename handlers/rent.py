@@ -673,7 +673,7 @@ async def rent_confirm_callback(update: Update, context: Context):
                     f"🤖 Bot sẽ tự động kiểm tra OTP trong vài phút tới.\n\n"
                     f"📌 Bạn có thể kiểm tra OTP thủ công bằng nút '🔍 KIỂM TRA OTP'.",
                     reply_markup=InlineKeyboardMarkup(keyboard),
-                    parse_mode='Markdown'
+                    parse_mode='HTML'
                 )
 
                 task = asyncio.create_task(
@@ -786,7 +786,7 @@ async def rent_check_callback(update: Update, context: Context):
                     await context.bot.send_message(
                         chat_id=update.effective_chat.id,
                         text=f"✅ **MÃ OTP:** `{otp_code}`\n📝 {content}",
-                        parse_mode='Markdown'
+                        parse_mode='HTML'
                     )
                 
                 if audio_url:
@@ -902,7 +902,7 @@ async def auto_check_otp_task(bot, chat_id: int, otp_id: str, rental_id: int, us
                                      f"📞 Số `{phone}` đã hết hạn.\n"
                                      f"💰 **Đã hoàn lại {refund:,}đ!**\n"
                                      f"💵 **Số dư mới:** {user.balance:,}đ",
-                                parse_mode='Markdown'
+                                parse_mode='HTML'
                             )
 
                             if rental_id in auto_check_tasks:
@@ -989,8 +989,8 @@ async def auto_check_otp_task(bot, chat_id: int, otp_id: str, rental_id: int, us
                             if otp_code:
                                 await bot.send_message(
                                     chat_id=chat_id,
-                                    text=f"🔑 **MÃ OTP:** `{otp_code}`\n📝 {content}\n📱 **Dịch vụ:** {service_name}\n📞 **Số:** `{phone}`",
-                                    parse_mode='Markdown'
+                                    text=f"🔑 <b>MÃ OTP:</b> <code>{otp_code}</code>\n📝 {content}\n📱 <b>Dịch vụ:</b> {service_name}\n📞 <b>Số:</b> <code>{phone}</code>",
+                                    parse_mode='HTML'
                                 )
 
                             if audio_url:
@@ -1181,7 +1181,7 @@ async def rent_view_callback(update: Update, context: Context):
             ])
         
         if rental.otp_code:
-            text += f"🔑 **MÃ OTP:** `{rental.otp_code}`\n"
+            text += f"🔑 <b>MÃ OTP:</b> <code>{rental.otp_code}</code>\n"
             if rental.content:
                 text += f"📝 **Nội dung:** {rental.content}\n"
         
