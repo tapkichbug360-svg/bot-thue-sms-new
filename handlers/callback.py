@@ -27,19 +27,64 @@ async def safe_answer_callback(query, text=None, show_alert=False):
         logger.debug(f"Answer callback error: {e}")
 
 async def safe_edit_message(query, text, reply_markup=None, parse_mode=None, max_retries=2):
-    """Sửa tin nhắn an toàn, tự động retry"""
+    """Sửa tin nhắn an toàn, tự động retry và fallback khi không có text"""
     for attempt in range(max_retries):
         try:
+            # Kiểm tra xem message có text không
+            if query.message.text is None:
+                # Nếu không có text, gửi message mới
+                await query.message.reply_text(
+                    text=text,
+                    reply_markup=reply_markup,
+                    parse_mode=parse_mode
+                )
+                # Xóa message cũ nếu có thể
+                try:
+                    await query.message.delete()
+                except:
+                    pass
+                return True
+            
+            # Nếu có text, thử edit
             await query.edit_message_text(
                 text=text,
                 reply_markup=reply_markup,
                 parse_mode=parse_mode
             )
             return True
+            
         except Exception as e:
-            if attempt == max_retries - 1:
+            error_str = str(e).lower()
+            if "no text in the message" in error_str or "message can't be edited" in error_str:
+                # Lỗi do không có text hoặc không edit được - gửi message mới
+                try:
+                    # Gửi message mới
+                    await query.message.reply_text(
+                        text=text,
+                        reply_markup=reply_markup,
+                        parse_mode=parse_mode
+                    )
+                    # Xóa message cũ
+                    try:
+                        await query.message.delete()
+                    except:
+                        pass
+                    return True
+                except Exception as send_error:
+                    logger.error(f"Send fallback failed: {send_error}")
+                    return False
+            elif attempt == max_retries - 1:
                 logger.error(f"Edit message failed: {e}")
-                return False
+                # Thử gửi message mới nhưng không xóa cũ
+                try:
+                    await query.message.reply_text(
+                        text=text,
+                        reply_markup=reply_markup,
+                        parse_mode=parse_mode
+                    )
+                    return True
+                except:
+                    return False
             await asyncio.sleep(0.5)
     return False
 
@@ -56,6 +101,37 @@ async def safe_send_message(context, chat_id, text, reply_markup=None, parse_mod
     except Exception as e:
         logger.error(f"Send message failed: {e}")
         return False
+
+async def safe_return_to_home(query, context, text="🎯 **MENU CHÍNH**\n\nChọn chức năng bên dưới:"):
+    """Hàm chuyên dụng để quay về home an toàn"""
+    try:
+        # Kiểm tra loại message
+        if query.message.text is None:
+            # Message không phải text - gửi mới
+            await context.bot.send_message(
+                chat_id=query.message.chat.id,
+                text=text,
+                reply_markup=main_menu,
+                parse_mode='Markdown'
+            )
+            # Xóa message cũ
+            try:
+                await query.message.delete()
+            except:
+                pass
+        else:
+            # Message có text - thử edit
+            await safe_edit_message(query, text, main_menu, 'Markdown')
+    except Exception as e:
+        logger.error(f"Safe return to home failed: {e}")
+        # Fallback cuối cùng
+        await safe_send_message(
+            context, 
+            query.message.chat.id, 
+            text, 
+            main_menu, 
+            'Markdown'
+        )
 
 # ==================== CACHE MENU ====================
 menu_cache = {}
@@ -96,7 +172,7 @@ main_menu = get_cached_menu("main", create_main_menu)
 
 # ==================== MENU CALLBACK CHÍNH ====================
 async def menu_callback(update: Update, context: Context):
-    """Xử lý tất cả các callback từ menu - ĐÃ TỐI ƯU"""
+    """Xử lý tất cả các callback từ menu - ĐÃ TỐI ƯU VÀ SỬA LỖI"""
     query = update.callback_query
     await safe_answer_callback(query)
     
@@ -105,7 +181,7 @@ async def menu_callback(update: Update, context: Context):
     # ===== MENU CHÍNH =====
     if data == 'menu_main':
         text = "🎯 **MENU CHÍNH**\n\nChọn chức năng bên dưới:"
-        await safe_edit_message(query, text, main_menu, 'Markdown')
+        await safe_return_to_home(query, context, text)
     
     # ===== CÁC MENU CHUYỂN HƯỚNG =====
     elif data == 'menu_balance':
@@ -169,7 +245,22 @@ async def menu_callback(update: Update, context: Context):
                 text += "\n"
         
         reply_markup = create_back_menu("menu_main")
-        await safe_edit_message(query, text, reply_markup, 'Markdown')
+        
+        # Kiểm tra loại message trước khi edit
+        if query.message.text is None:
+            # Message không phải text
+            await context.bot.send_message(
+                chat_id=query.message.chat.id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+            try:
+                await query.message.delete()
+            except:
+                pass
+        else:
+            await safe_edit_message(query, text, reply_markup, 'Markdown')
     
     # ===== HƯỚNG DẪN =====
     elif data == 'menu_help':
@@ -198,7 +289,21 @@ async def menu_callback(update: Update, context: Context):
 📞 **Hỗ trợ:** @makkllai"""
         
         reply_markup = create_back_menu("menu_main")
-        await safe_edit_message(query, text, reply_markup, 'Markdown')
+        
+        # Kiểm tra loại message trước khi edit
+        if query.message.text is None:
+            await context.bot.send_message(
+                chat_id=query.message.chat.id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+            try:
+                await query.message.delete()
+            except:
+                pass
+        else:
+            await safe_edit_message(query, text, reply_markup, 'Markdown')
     
     # ===== THÔNG TIN TÀI KHOẢN =====
     elif data == 'menu_profile':
@@ -223,4 +328,18 @@ async def menu_callback(update: Update, context: Context):
 • **Đã chi:** `{total_spent:,}đ`"""
         
         reply_markup = create_back_menu("menu_main")
-        await safe_edit_message(query, text, reply_markup, 'Markdown')
+        
+        # Kiểm tra loại message trước khi edit
+        if query.message.text is None:
+            await context.bot.send_message(
+                chat_id=query.message.chat.id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+            try:
+                await query.message.delete()
+            except:
+                pass
+        else:
+            await safe_edit_message(query, text, reply_markup, 'Markdown')

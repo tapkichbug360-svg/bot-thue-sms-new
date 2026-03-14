@@ -519,7 +519,7 @@ async def rent_network_callback(update: Update, context: Context):
         f"📌 **Lưu ý:**\n"
         f"• Số tiền sẽ được trừ ngay sau khi xác nhận\n"
         f"• Có thể hủy và được hoàn tiền nếu chưa nhận OTP\n"
-        f"• Số có hiệu lực trong 5 phút\n\n"
+        f"• Số có hiệu lực trong 10 phút\n\n"
         f"❓ **Xác nhận thuê số?**"
     )
     
@@ -629,7 +629,7 @@ async def rent_confirm_callback(update: Update, context: Context):
                     price_charged=final_price,
                     status='waiting',
                     created_at=datetime.now(),
-                    expires_at=datetime.now() + timedelta(minutes=5)
+                    expires_at=datetime.now() + timedelta(minutes=10)
                 )
                 db.session.add(rental)
                 
@@ -1309,7 +1309,7 @@ async def rent_reuse_callback(update: Update, context: Context):
                     price_charged=price,
                     status='waiting',
                     created_at=datetime.now(),
-                    expires_at=datetime.now() + timedelta(minutes=5)
+                    expires_at=datetime.now() + timedelta(minutes=10)
                 )
 
                 db.session.add(rental)

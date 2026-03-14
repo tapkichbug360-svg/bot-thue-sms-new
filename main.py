@@ -865,7 +865,7 @@ scheduler.start()
 
 scheduler.add_job(
     func=check_expired_rentals,
-    trigger=IntervalTrigger(minutes=5),
+    trigger=IntervalTrigger(minutes=10),
     id='check_expired_rentals',
     name='Kiểm tra số hết hạn',
     replace_existing=True
