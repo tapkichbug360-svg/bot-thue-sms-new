@@ -898,11 +898,11 @@ async def auto_check_otp_task(bot, chat_id: int, otp_id: str, rental_id: int, us
 
                             await bot.send_message(
                                 chat_id=chat_id,
-                                text=f"⏰ **SỐ ĐÃ HẾT HẠN**\n\n"
-                                     f"📞 Số `{phone}` đã hết hạn.\n"
-                                     f"💰 **Đã hoàn lại {refund:,}đ!**\n"
-                                     f"💵 **Số dư mới:** {user.balance:,}đ",
-                                parse_mode='HTML'
+                                text=f"⏰ SỐ ĐÃ HẾT HẠN\n\n"
+                                    f"📞 Số {phone} đã hết hạn.\n"
+                                    f"💰 Đã hoàn lại {refund:,}đ!\n"
+                                    f"💵 Số dư mới: {user.balance:,}đ",
+                                parse_mode=None
                             )
 
                             if rental_id in auto_check_tasks:
@@ -1089,11 +1089,11 @@ async def auto_check_otp_task(bot, chat_id: int, otp_id: str, rental_id: int, us
 
                         await bot.send_message(
                             chat_id=chat_id,
-                            text=f"⏰ **SỐ ĐÃ HẾT HẠN**\n\n"
-                                 f"📞 `{phone}` đã hết thời gian chờ OTP.\n"
-                                 f"💰 **Đã hoàn lại {refund:,}đ**\n"
-                                 f"💵 **Số dư mới:** {user.balance:,}đ",
-                            parse_mode='Markdown'
+                            text=f"⏰ SỐ ĐÃ HẾT HẠN\n\n"
+                                f"📞 Số {phone} đã hết thời gian chờ OTP.\n"
+                                f"💰 Đã hoàn lại {refund:,}đ\n"
+                                f"💵 Số dư mới: {user.balance:,}đ",
+                            parse_mode=None
                         )
 
             if rental_id in auto_check_tasks:
