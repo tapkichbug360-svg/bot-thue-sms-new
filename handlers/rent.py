@@ -786,7 +786,7 @@ async def rent_check_callback(update: Update, context: Context):
                     await context.bot.send_message(
                         chat_id=update.effective_chat.id,
                         text=f"✅ **MÃ OTP:** `{otp_code}`\n📝 {content}",
-                        parse_mode='HTML'
+                        parse_mode=None
                     )
                 
                 if audio_url:
