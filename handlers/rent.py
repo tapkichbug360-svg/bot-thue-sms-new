@@ -673,7 +673,7 @@ async def rent_confirm_callback(update: Update, context: Context):
                     f"🤖 Bot sẽ tự động kiểm tra OTP trong vài phút tới.\n\n"
                     f"📌 Bạn có thể kiểm tra OTP thủ công bằng nút '🔍 KIỂM TRA OTP'.",
                     reply_markup=InlineKeyboardMarkup(keyboard),
-                    parse_mode='HTML'
+                    parse_mode=None
                 )
 
                 task = asyncio.create_task(
@@ -990,7 +990,7 @@ async def auto_check_otp_task(bot, chat_id: int, otp_id: str, rental_id: int, us
                                 await bot.send_message(
                                     chat_id=chat_id,
                                     text=f"🔑 <b>MÃ OTP:</b> <code>{otp_code}</code>\n📝 {content}\n📱 <b>Dịch vụ:</b> {service_name}\n📞 <b>Số:</b> <code>{phone}</code>",
-                                    parse_mode='HTML'
+                                    parse_mode=None
                                 )
 
                             if audio_url:
