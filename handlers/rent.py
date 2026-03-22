@@ -664,11 +664,11 @@ async def rent_confirm_callback(update: Update, context: Context):
 
                 # Sau khi commit thành công và push lên Render
                 await loading_msg.edit_text(
-                    f"✅ <b>THUÊ SỐ THÀNH CÔNG!</b>\n\n"
-                    f"📞 <b>Số:</b> <code>{phone}</code>\n"
-                    f"📱 <b>Dịch vụ:</b> {rent_info['service_name']}\n"
-                    f"💰 <b>Đã thanh toán:</b> {final_price:,}đ\n"
-                    f"💵 <b>Số dư còn lại:</b> {db_user.balance:,}đ\n\n"
+                    f"✅ THUÊ SỐ THÀNH CÔNG!\n\n"
+                    f"📞 Số: {phone}\n"
+                    f"📱 Dịch vụ: {rent_info['service_name']}\n"
+                    f"💰 Đã thanh toán: {final_price:,}đ\n"
+                    f"💵 Số dư còn lại: {db_user.balance:,}đ\n\n"
                     f"⏳ Vui lòng chờ, hệ thống sẽ tự động gửi OTP cho quý khách khi nhận được!\n"
                     f"🤖 Bot sẽ tự động kiểm tra OTP trong vài phút tới.\n\n"
                     f"📌 Bạn có thể kiểm tra OTP thủ công bằng nút '🔍 KIỂM TRA OTP'.",
@@ -785,7 +785,7 @@ async def rent_check_callback(update: Update, context: Context):
                 if otp_code:
                     await context.bot.send_message(
                         chat_id=update.effective_chat.id,
-                        text=f"✅ **MÃ OTP:** `{otp_code}`\n📝 {content}",
+                        text=f"✅ MÃ OTP: {otp_code}\n📝 {content}",
                         parse_mode=None
                     )
                 
@@ -989,7 +989,7 @@ async def auto_check_otp_task(bot, chat_id: int, otp_id: str, rental_id: int, us
                             if otp_code:
                                 await bot.send_message(
                                     chat_id=chat_id,
-                                    text=f"🔑 <b>MÃ OTP:</b> <code>{otp_code}</code>\n📝 {content}\n📱 <b>Dịch vụ:</b> {service_name}\n📞 <b>Số:</b> <code>{phone}</code>",
+                                    text=f"🔑 MÃ OTP: {otp_code}\n📝 {content}\n📱 Dịch vụ: {service_name}\n📞 Số: {phone}",
                                     parse_mode=None
                                 )
 
