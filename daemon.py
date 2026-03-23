@@ -421,12 +421,6 @@ class UserSyncDaemon:
         except Exception as e:
             self.log(f"❌ Lỗi pull user {user_id}: {e}", "ERROR")
             return False
-
-    # TẮT HOÀN TOÀN PUSH
-    def push_user_to_render(self, user_id, balance, username, reason=""):
-        """TẮT PUSH - Daemon không push, chỉ pull"""
-        self.log(f"⏭️ Daemon không push user {user_id} - Render là nguồn chính", "INFO")
-        return True
         
     def push_user_batch(self, users):
         """Đẩy nhiều user song song - LỌC USER CÓ BALANCE > 0"""
